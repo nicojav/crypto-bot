@@ -1,0 +1,21 @@
+{
+  "name": "crypto-bot",
+  "private": true,
+  "version": "0.0.1",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w apps/bot\" \"npm run dev -w apps/dashboard\"",
+    "build": "npm run build -w apps/bot && npm run build -w apps/dashboard",
+    "lint": "npm run lint -w apps/bot && npm run lint -w apps/dashboard",
+    "test": "npm run test -w apps/bot",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,js,json}\" \"packages/**/*.{ts,js,json}\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
+  }
+}
