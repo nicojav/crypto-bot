@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Bot {
+  id               Int       @id @default(autoincrement())
+  name             String
+  symbol           String
+  enabled          Boolean   @default(true)
+  dryRun           Boolean   @default(true)
+  maxLeverage      Int       @default(10)
+  maxPositionUsd   Float     @default(100)
+  createdAt        DateTime  @default(now())
+
+  signals          Signal[]
+  trades           Trade[]
+}
+
+model Signal {
+  id               Int       @id @default(autoincrement())
+  botId            Int
+  webhookId        String    @unique
+  action           String    // BUY | SELL | CLOSE
+  payload          String    // JSON blob
+  receivedAt       DateTime  @default(now())
+  processedAt      DateTime?
+  status           String    @default("PENDING") // PENDING | EXECUTED | REJECTED | DUPLICATE
+  rejectionReason  String?
+
+  bot              Bot       @relation(fields: [botId], references: [id])
+  trade            Trade?
+}
+
+model Trade {
+  id               Int       @id @default(autoincrement())
+  botId            Int
+  signalId         Int       @unique
+  exchangeOrderId  String
+  symbol           String
+  side             String    // BUY | SELL
+  qty              Float
+  entryPrice       Float
+  exitPrice        Float?
+  pnlUsd           Float?
+  status           String    @default("OPEN") // OPEN | CLOSED
+  openedAt         DateTime  @default(now())
+  closedAt         DateTime?
+
+  bot              Bot       @relation(fields: [botId], references: [id])
+  signal           Signal    @relation(fields: [signalId], references: [id])
+}
+
+model BalanceSnapshot {
+  id               Int       @id @default(autoincrement())
+  equityUsd        Float
+  availableUsd     Float
+  takenAt          DateTime  @default(now())
+}

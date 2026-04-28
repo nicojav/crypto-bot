@@ -31,3 +31,8 @@ Thumbs.db
 .vscode/settings.json
 .idea/
 *.swp
+
+# Claude Code
+.claude/
+.agents/
+skills-lock.json
