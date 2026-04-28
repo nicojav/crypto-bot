@@ -12,7 +12,7 @@ A TradingView → Webhook → Bybit Futures trading bot with a React dashboard, 
 |---|--------|-------|--------|
 | 0 | [phase-00-setup](phase-00-setup/) | Project setup & repo scaffolding | ✅ Complete |
 | 1 | [phase-01-database](phase-01-database/) | Database schema & Prisma setup | Pending |
-| 2 | [phase-02-webhook](phase-02-webhook/) | Webhook receiver | Pending |
+| 2 | [phase-02-webhook](phase-02-webhook/) | Webhook receiver | ✅ Complete |
 | 3 | [phase-03-bybit-integration](phase-03-bybit-integration/) | Bybit testnet integration | Pending |
 | 4 | [phase-04-execution](phase-04-execution/) | Order execution & signal processor | Pending |
 | 5 | [phase-05-reconciliation](phase-05-reconciliation/) | Position & balance reconciliation | Pending |
