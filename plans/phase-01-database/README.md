@@ -1,6 +1,6 @@
 # Phase 1 — Database schema & Prisma setup
 
-**Status:** Pending
+**Status:** ✅ Complete
 
 ## Goal
 
