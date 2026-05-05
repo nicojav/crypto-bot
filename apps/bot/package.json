@@ -5,7 +5,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "lint": "eslint src --ext .ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check-bybit": "tsx ../../scripts/check-bybit.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -14,6 +15,7 @@
     "@prisma/adapter-better-sqlite3": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "better-sqlite3": "^12.9.0",
+    "bybit-api": "^4.6.2",
     "dotenv": "^16.4.5",
     "fastify": "^4.27.0",
     "prisma": "^7.8.0",

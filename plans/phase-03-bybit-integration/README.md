@@ -1,6 +1,6 @@
 # Phase 3 — Bybit testnet integration (read-only first)
 
-**Status:** Pending
+**Status:** Complete
 
 ## Goal
 
