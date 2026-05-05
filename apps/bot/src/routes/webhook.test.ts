@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
-import { readFileSync, unlinkSync } from "node:fs";
+import { readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,10 +22,12 @@ vi.mock("../env.js", () => ({
   },
 }));
 
-const MIGRATION_SQL = readFileSync(
-  resolve(__dirname, "../../prisma/migrations/20260428001858_init/migration.sql"),
-  "utf8"
-);
+const MIGRATIONS_DIR = resolve(__dirname, "../../prisma/migrations");
+const MIGRATION_SQL = readdirSync(MIGRATIONS_DIR)
+  .filter((d) => d !== "migration_lock.toml")
+  .sort()
+  .map((d) => readFileSync(resolve(MIGRATIONS_DIR, d, "migration.sql"), "utf8"))
+  .join("\n");
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
 const BetterSqlite3 = require("better-sqlite3") as any;

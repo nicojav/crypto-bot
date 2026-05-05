@@ -1,8 +1,13 @@
 import { buildApp } from "./app.js";
 import { prisma } from "./db.js";
 import { env } from "./env.js";
+import { BybitClient } from "./exchange/bybit.js";
+import { SignalProcessor } from "./processor/signalProcessor.js";
 
-const app = buildApp(prisma, { level: env.LOG_LEVEL });
+const bybit = new BybitClient();
+const processor = new SignalProcessor(prisma, bybit);
+
+const app = buildApp(prisma, { level: env.LOG_LEVEL }, processor);
 
 app.listen({ port: env.PORT, host: "0.0.0.0" }, (err) => {
   if (err) {

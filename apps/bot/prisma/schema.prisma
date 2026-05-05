@@ -13,9 +13,10 @@ model Bot {
   symbol           String
   enabled          Boolean   @default(true)
   dryRun           Boolean   @default(true)
-  maxLeverage      Int       @default(10)
-  maxPositionUsd   Float     @default(100)
-  createdAt        DateTime  @default(now())
+  maxLeverage        Int       @default(10)
+  maxPositionUsd     Float     @default(100)
+  dailyLossLimitUsd  Float     @default(-500)
+  createdAt          DateTime  @default(now())
 
   signals          Signal[]
   trades           Trade[]

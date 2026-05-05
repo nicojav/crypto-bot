@@ -116,6 +116,46 @@ export class BybitClient {
     }));
   }
 
+  async getMarkPrice(symbol: string): Promise<number> {
+    const res = await withRetry(() =>
+      this.client.getTickers({ category: "linear", symbol })
+    );
+    if (res.retCode !== 0) bybitError(res);
+    const ticker = res.result.list[0] as { markPrice: string } | undefined;
+    if (!ticker) throw new Error(`No ticker found for ${symbol}`);
+    return Number(ticker.markPrice);
+  }
+
+  async setLeverage(symbol: string, leverage: number): Promise<void> {
+    const res = await this.client.setLeverage({
+      category: "linear",
+      symbol,
+      buyLeverage: String(leverage),
+      sellLeverage: String(leverage),
+    });
+    // 110043 = leverage not modified (already at requested value)
+    if (res.retCode !== 0 && res.retCode !== 110043) bybitError(res);
+  }
+
+  async placeMarketOrder(params: {
+    symbol: string;
+    side: "Buy" | "Sell";
+    qty: number;
+    reduceOnly: boolean;
+  }): Promise<string> {
+    // No retry on order placement — partial fills and duplicates are dangerous
+    const res = await this.client.submitOrder({
+      category: "linear",
+      symbol: params.symbol,
+      side: params.side,
+      orderType: "Market",
+      qty: String(params.qty),
+      reduceOnly: params.reduceOnly,
+    });
+    if (res.retCode !== 0) bybitError(res);
+    return res.result.orderId;
+  }
+
   async getInstrumentInfo(symbol: string): Promise<InstrumentInfo> {
     const res = await withRetry(() =>
       this.client.getInstrumentsInfo({ category: "linear", symbol })
