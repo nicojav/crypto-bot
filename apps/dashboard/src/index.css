@@ -1,3 +1,37 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    background-color: #0e0e10;
+    color: #f0f0f2;
+    font-family: "Outfit", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a2e;
+    border-radius: 99px;
+  }
+}
+
+@layer utilities {
+  .data-label {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #8a8a95;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+}

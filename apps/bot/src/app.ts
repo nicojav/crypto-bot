@@ -23,10 +23,15 @@ export function buildApp(
     },
   });
 
+  const allowedOrigins = new Set(env.DASHBOARD_ORIGIN.split(",").map((o) => o.trim()));
+
   app.addHook("onRequest", async (req, reply) => {
-    reply.header("Access-Control-Allow-Origin", env.DASHBOARD_ORIGIN);
+    const origin = req.headers.origin ?? "";
+    const allowed = allowedOrigins.has(origin) ? origin : env.DASHBOARD_ORIGIN.split(",")[0]!.trim();
+    reply.header("Access-Control-Allow-Origin", allowed);
     reply.header("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
     reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    reply.header("Vary", "Origin");
     if (req.method === "OPTIONS") {
       return reply.status(204).send();
     }

@@ -1,6 +1,6 @@
 # Phase 6 — Dashboard backend (REST API)
 
-**Status:** Complete
+**Status:** ✅ Complete
 
 ## Goal
 

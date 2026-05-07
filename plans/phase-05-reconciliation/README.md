@@ -1,6 +1,6 @@
 # Phase 5 — Position & balance reconciliation
 
-**Status:** Complete
+**Status:** ✅ Complete
 
 ## Goal
 

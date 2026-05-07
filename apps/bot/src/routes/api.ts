@@ -72,6 +72,20 @@ const equityItem = {
   },
 } as const;
 
+const signalItem = {
+  type: "object",
+  properties: {
+    id: { type: "integer" },
+    botId: { type: "integer" },
+    action: { type: "string" },
+    symbol: { type: "string" },
+    status: { type: "string" },
+    receivedAt: { type: "string" },
+    processedAt: { type: ["string", "null"] },
+    rejectionReason: { type: ["string", "null"] },
+  },
+} as const;
+
 const errorSchema = {
   type: "object",
   properties: {
@@ -88,6 +102,7 @@ interface PatchBotBody {
   dryRun?: boolean;
   maxPositionUsd?: number;
   maxLeverage?: number;
+  dailyLossLimitUsd?: number;
 }
 
 interface TradesQuery {
@@ -95,6 +110,11 @@ interface TradesQuery {
   limit: number;
   from?: string;
   to?: string;
+}
+
+interface SignalsQuery {
+  botId?: number;
+  limit: number;
 }
 
 interface EquityQuery {
@@ -187,6 +207,7 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastif
           dryRun: { type: "boolean" },
           maxPositionUsd: { type: "number", exclusiveMinimum: 0 },
           maxLeverage: { type: "integer", minimum: 1 },
+          dailyLossLimitUsd: { type: "number" },
         },
         additionalProperties: false,
         minProperties: 1,
@@ -201,6 +222,38 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastif
       if (isPrismaNotFound(err)) return reply.status(404).send({ error: "Not found" });
       throw err;
     }
+  });
+
+  // GET /api/signals
+  fastify.get<{ Querystring: SignalsQuery }>("/api/signals", {
+    schema: {
+      querystring: {
+        type: "object",
+        properties: {
+          botId: { type: "integer", minimum: 1 },
+          limit: { type: "integer", minimum: 1, maximum: 500, default: 50 },
+        },
+      },
+      response: { 200: { type: "array", items: signalItem } },
+    },
+  }, async (req) => {
+    const { botId, limit } = req.query;
+    const signals = await db.signal.findMany({
+      where: botId !== undefined ? { botId } : {},
+      include: { bot: { select: { symbol: true } } },
+      orderBy: { receivedAt: "desc" },
+      take: limit,
+    });
+    return signals.map((s) => ({
+      id: s.id,
+      botId: s.botId,
+      action: s.action,
+      symbol: s.bot.symbol,
+      status: s.status,
+      receivedAt: s.receivedAt.toISOString(),
+      processedAt: s.processedAt?.toISOString() ?? null,
+      rejectionReason: s.rejectionReason ?? null,
+    }));
   });
 
   // GET /api/trades
