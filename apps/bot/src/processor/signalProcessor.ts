@@ -1,4 +1,5 @@
 import type { PrismaClient, Bot, Signal, Trade } from "../generated/prisma/client.js";
+import type { EventBus } from "../eventBus.js";
 
 type SignalWithBot = Signal & { bot: Bot };
 
@@ -27,6 +28,7 @@ export class SignalProcessor {
   constructor(
     private readonly db: PrismaClient,
     private readonly exchange: Exchange,
+    private readonly bus?: EventBus,
   ) {}
 
   start(intervalMs = 500): void {
@@ -60,6 +62,7 @@ export class SignalProcessor {
     const { bot } = signal;
     const payload = JSON.parse(signal.payload) as { symbol: string; price?: number };
     const { symbol } = payload;
+    this.bus?.publish({ type: "signal.received", data: { signalId: signal.id, botId: bot.id, action: signal.action, symbol } });
 
     // Kill-switch applies to all actions; other risk checks skip CLOSE (reduces exposure)
     if (!bot.enabled) {
@@ -133,11 +136,14 @@ export class SignalProcessor {
           data: { status: "EXECUTED", processedAt: now },
         }),
       ]);
+      for (const t of openTrades) {
+        this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol, pnlUsd: pnlForTrade(t, price) } });
+      }
       return;
     }
 
     const qty = calcQty(bot.maxPositionUsd, price, 0.001);
-    await this.db.$transaction([
+    const [, trade] = await this.db.$transaction([
       this.db.signal.update({
         where: { id: signal.id },
         data: { status: "EXECUTED", processedAt: new Date() },
@@ -155,6 +161,7 @@ export class SignalProcessor {
         },
       }),
     ]);
+    this.bus?.publish({ type: "trade.opened", data: { tradeId: trade.id, botId: bot.id, symbol, side: signal.action, qty, entryPrice: price } });
   }
 
   private async processLive(signal: SignalWithBot, bot: Bot, symbol: string): Promise<void> {
@@ -187,6 +194,9 @@ export class SignalProcessor {
           data: { status: "EXECUTED", processedAt: now },
         }),
       ]);
+      for (const t of openTrades) {
+        this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol, pnlUsd: pnlForTrade(t, markPrice) } });
+      }
       console.log(`[processor] CLOSE ${symbol} orderId=${orderId} markPrice=${markPrice}`);
       return;
     }
@@ -204,7 +214,7 @@ export class SignalProcessor {
     const side = signal.action === "BUY" ? "Buy" : "Sell";
     const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
 
-    await this.db.$transaction([
+    const [, liveTrade] = await this.db.$transaction([
       this.db.signal.update({
         where: { id: signal.id },
         data: { status: "EXECUTED", processedAt: new Date() },
@@ -222,6 +232,7 @@ export class SignalProcessor {
         },
       }),
     ]);
+    this.bus?.publish({ type: "trade.opened", data: { tradeId: liveTrade.id, botId: bot.id, symbol, side: signal.action, qty, entryPrice: markPrice } });
     console.log(`[processor] ${signal.action} ${qty} ${symbol} @ ~${markPrice} orderId=${orderId}`);
   }
 

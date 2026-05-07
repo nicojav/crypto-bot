@@ -12,6 +12,8 @@
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/websocket": "^11.2.0",
     "@prisma/adapter-better-sqlite3": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "better-sqlite3": "^12.9.0",
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@crypto-bot/eslint-config": "*",
     "@types/node": "^20.12.11",
+    "@types/ws": "^8.18.1",
     "eslint": "^8.57.0",
     "tsx": "^4.10.5",
     "typescript": "^5.4.5",

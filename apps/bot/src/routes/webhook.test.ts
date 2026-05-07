@@ -13,6 +13,8 @@ const TEST_SECRET = vi.hoisted(() => "test_webhook_secret_xyz");
 vi.mock("../env.js", () => ({
   env: {
     WEBHOOK_SECRET: TEST_SECRET,
+    API_TOKEN: "test_api_token_1234567890",
+    DASHBOARD_ORIGIN: "http://localhost:5173",
     DATABASE_URL: "file:./dev.db",
     PORT: 3000,
     LOG_LEVEL: "error",

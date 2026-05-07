@@ -1,6 +1,7 @@
 import { WebsocketClient } from "bybit-api";
 import type { PrismaClient } from "../generated/prisma/client.js";
 import type { BybitClient } from "../exchange/bybit.js";
+import type { EventBus } from "../eventBus.js";
 import { env } from "../env.js";
 
 interface WsPositionUpdate {
@@ -34,6 +35,7 @@ export class Reconciler {
   constructor(
     private readonly db: PrismaClient,
     private readonly bybit: BybitClient,
+    private readonly bus?: EventBus,
   ) {}
 
   async start(): Promise<void> {
@@ -100,6 +102,7 @@ export class Reconciler {
     await this.db.balanceSnapshot.create({
       data: { equityUsd: bal.equity, availableUsd: bal.available },
     });
+    this.bus?.publish({ type: "balance.updated", data: { equityUsd: bal.equity, availableUsd: bal.available } });
     console.log(`[reconciler] snapshot: equity=${bal.equity} available=${bal.available}`);
   }
 
@@ -146,6 +149,9 @@ export class Reconciler {
         })
       )
     );
+    for (const t of openTrades) {
+      this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol: order.symbol, pnlUsd: pnlForClose(t.entryPrice, exitPrice, t.qty, t.side) } });
+    }
     console.log(`[reconciler] order fill: closed ${openTrades.length} trade(s) for ${order.symbol} @ ${exitPrice}`);
   }
 
@@ -170,6 +176,9 @@ export class Reconciler {
         })
       )
     );
+    for (const t of openTrades) {
+      this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol, pnlUsd: pnlForClose(t.entryPrice, exitPrice, t.qty, t.side) } });
+    }
     console.log(`[reconciler] position closed: ${openTrades.length} remaining trade(s) for ${symbol} @ ${exitPrice}`);
   }
 

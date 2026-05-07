@@ -9,6 +9,8 @@ const schema = z.object({
     .default("true")
     .transform((v) => v === "true"),
   WEBHOOK_SECRET: z.string().min(16),
+  API_TOKEN: z.string().min(16),
+  DASHBOARD_ORIGIN: z.string().default("http://localhost:5173"),
   DATABASE_URL: z.string().min(1).default("file:./dev.db"),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),

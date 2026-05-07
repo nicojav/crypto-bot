@@ -2,12 +2,15 @@ import { buildApp } from "./app.js";
 import { prisma } from "./db.js";
 import { env } from "./env.js";
 import { BybitClient } from "./exchange/bybit.js";
+import { EventBus } from "./eventBus.js";
 import { SignalProcessor } from "./processor/signalProcessor.js";
 import { Reconciler } from "./reconciliation/reconciler.js";
+import { attachWebSocketServer } from "./ws.js";
 
+const bus = new EventBus();
 const bybit = new BybitClient();
-const processor = new SignalProcessor(prisma, bybit);
-const reconciler = new Reconciler(prisma, bybit);
+const processor = new SignalProcessor(prisma, bybit, bus);
+const reconciler = new Reconciler(prisma, bybit, bus);
 
 const app = buildApp(prisma, { level: env.LOG_LEVEL }, processor);
 
@@ -24,5 +27,6 @@ app.listen({ port: env.PORT, host: "0.0.0.0" }, (err) => {
     app.log.error(err);
     process.exit(1);
   }
+  attachWebSocketServer(app.server, bus);
   app.log.info(`ready on :${env.PORT}`);
 });
