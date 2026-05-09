@@ -61,8 +61,15 @@ Configure the auto-created service:
 
 > **Do not set `PORT`** — Railway injects it automatically. The bot already reads it at `apps/bot/src/env.ts:15`.
 
-5. **Settings → Networking → Generate Domain** to get a public HTTPS URL.
-6. Trigger a deploy. Once green, note the URL (e.g. `https://bot-production.up.railway.app`).
+5. **Settings → Source → Watch Paths** → add these lines so the bot only redeploys when its own code changes (not on every monorepo push):
+   ```
+   apps/bot/**
+   packages/**
+   package.json
+   package-lock.json
+   ```
+6. **Settings → Networking → Generate Domain** to get a public HTTPS URL.
+7. Trigger a deploy. Once green, note the URL (e.g. `https://bot-production.up.railway.app`).
 
 ---
 
@@ -78,8 +85,15 @@ Configure the auto-created service:
 |---|---|
 | `VITE_API_URL` | `https://<bot>.up.railway.app` (bot service URL from step 2) |
 
-5. **Settings → Networking → Generate Domain** to get the dashboard's public URL.
-6. Trigger a deploy.
+5. **Settings → Source → Watch Paths** → add these lines so the dashboard only redeploys when its own code changes:
+   ```
+   apps/dashboard/**
+   packages/**
+   package.json
+   package-lock.json
+   ```
+6. **Settings → Networking → Generate Domain** to get the dashboard's public URL.
+7. Trigger a deploy.
 
 **Wire CORS**: go back to the bot service → **Variables** → update `DASHBOARD_ORIGIN` to `https://<dashboard>.up.railway.app`.
 
