@@ -13,6 +13,9 @@
     "test": "npm run test -w apps/bot",
     "format": "prettier --write \"apps/**/*.{ts,tsx,js,json}\" \"packages/**/*.{ts,js,json}\""
   },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "devDependencies": {
     "concurrently": "^8.2.2",
     "prettier": "^3.2.5",
