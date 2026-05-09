@@ -1,0 +1,9 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm ci && npm run build --workspace apps/dashboard"
+
+[deploy]
+startCommand = "npm start --workspace apps/dashboard"
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

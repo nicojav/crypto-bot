@@ -7,7 +7,11 @@ import { env } from "../env.js";
 const bodySchema = z.object({
   secret: z.string(),
   webhookId: z.string().min(1),
-  action: z.enum(["BUY", "SELL", "CLOSE"]),
+  // TradingView sends lowercase ("buy", "sell") via {{strategy.order.action}}
+  action: z
+    .string()
+    .transform((s) => s.toUpperCase())
+    .pipe(z.enum(["BUY", "SELL", "CLOSE"])),
   symbol: z.string().min(1),
   price: z.number().optional(),
   meta: z.record(z.unknown()).optional(),

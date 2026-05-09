@@ -156,6 +156,42 @@ describe("POST /webhook/:botId", () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it("TradingView lowercase 'buy' → 202 stored as BUY", async () => {
+    const body = { ...validBody(), action: "buy", webhookId: `tv-buy-${Math.random()}` };
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhook/${botId}`,
+      payload: body,
+    });
+    expect(res.statusCode).toBe(202);
+    const signal = await testDb.signal.findUnique({ where: { webhookId: body.webhookId } });
+    expect(signal?.action).toBe("BUY");
+  });
+
+  it("TradingView lowercase 'sell' → 202 stored as SELL", async () => {
+    const body = { ...validBody(), action: "sell", webhookId: `tv-sell-${Math.random()}` };
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhook/${botId}`,
+      payload: body,
+    });
+    expect(res.statusCode).toBe(202);
+    const signal = await testDb.signal.findUnique({ where: { webhookId: body.webhookId } });
+    expect(signal?.action).toBe("SELL");
+  });
+
+  it("lowercase 'close' → 202 stored as CLOSE", async () => {
+    const body = { ...validBody(), action: "close", webhookId: `tv-close-${Math.random()}` };
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhook/${botId}`,
+      payload: body,
+    });
+    expect(res.statusCode).toBe(202);
+    const signal = await testDb.signal.findUnique({ where: { webhookId: body.webhookId } });
+    expect(signal?.action).toBe("CLOSE");
+  });
 });
 
 describe("GET /health", () => {

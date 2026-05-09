@@ -30,3 +30,11 @@ app.listen({ port: env.PORT, host: "0.0.0.0" }, (err) => {
   attachWebSocketServer(app.server, bus);
   app.log.info(`ready on :${env.PORT}`);
 });
+
+const shutdown = async (signal: string) => {
+  app.log.info({ signal }, "shutting down");
+  await app.close();
+  process.exit(0);
+};
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT",  () => void shutdown("SIGINT"));

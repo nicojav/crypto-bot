@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "start": "vite preview --host 0.0.0.0 --port ${PORT:-4173}",
     "lint": "eslint src --ext .ts,.tsx",
     "preview": "vite preview"
   },

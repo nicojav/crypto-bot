@@ -1,0 +1,58 @@
+// @version=5
+// EMA crossover strategy — fires webhook alerts into the crypto-bot.
+//
+// Setup:
+//   1. Add to a chart and backtest to confirm signal timing looks right.
+//   2. Create a TradingView alert on this strategy (any condition).
+//   3. Paste the alert message template below into the "Message" field.
+//   4. Set webhook URL: https://your-domain.com/webhook/<botId>
+//      (use ngrok / cloudflared for local dev: ngrok http 3000)
+//
+// Alert message template:
+//   {
+//     "secret": "YOUR_WEBHOOK_SECRET",
+//     "webhookId": "{{ticker}}-{{interval}}-{{time}}-{{strategy.order.action}}",
+//     "action": "{{strategy.order.action}}",
+//     "symbol": "{{ticker}}",
+//     "price": {{close}}
+//   }
+//
+// TradingView fills {{strategy.order.action}} with "buy" or "sell" (lowercase).
+// The bot normalises these to BUY / SELL automatically.
+// To close all positions send a manual webhook with action "close".
+
+strategy(
+  title           = "EMA Cross Bot",
+  overlay         = true,
+  calc_on_every_tick = false,    // only fire on confirmed bar close — no repaints
+  default_qty_type  = strategy.percent_of_equity,
+  default_qty_value = 10
+)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+fastLen = input.int(20, "Fast EMA", minval=2)
+slowLen = input.int(50, "Slow EMA", minval=5)
+
+// ── Indicators ────────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+plot(emaFast, "Fast EMA", color=color.blue,   linewidth=1)
+plot(emaSlow, "Slow EMA", color=color.orange, linewidth=1)
+
+// ── Signals ───────────────────────────────────────────────────────────────────
+longEntry  = ta.crossover(emaFast, emaSlow)
+shortEntry = ta.crossunder(emaFast, emaSlow)
+
+// ── Orders ────────────────────────────────────────────────────────────────────
+if longEntry
+    strategy.close("Short", comment="Exit Short")
+    strategy.entry("Long",  strategy.long)
+
+if shortEntry
+    strategy.close("Long",  comment="Exit Long")
+    strategy.entry("Short", strategy.short)
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+plotshape(longEntry,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, title="Long signal")
+plotshape(shortEntry, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, title="Short signal")
