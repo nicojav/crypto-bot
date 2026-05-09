@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm ci && npm run build --workspace apps/bot"
+buildCommand = "npm run build --workspace apps/bot"
 
 [deploy]
 startCommand = "npm run migrate:deploy --workspace apps/bot && npm start --workspace apps/bot"
