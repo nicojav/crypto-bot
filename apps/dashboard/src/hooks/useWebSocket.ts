@@ -2,7 +2,8 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { BotEvent } from "../api/client";
 
-const WS_URL = (import.meta.env.VITE_WS_URL as string | undefined) ?? "ws://localhost:3000";
+const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
+const WS_URL = BASE.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
 
 export function useWebSocket() {
   const qc = useQueryClient();
