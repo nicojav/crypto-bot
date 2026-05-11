@@ -97,8 +97,7 @@ export class BybitClient {
     return {
       coin,
       equity: Number(coinData?.equity ?? 0),
-      // totalAvailableBalance is the account-level margin available for new orders
-      available: Number((account as unknown as { totalAvailableBalance?: string })?.totalAvailableBalance ?? coinData?.availableToWithdraw ?? 0),
+      available: Number(coinData?.walletBalance ?? 0),
     };
   }
 
