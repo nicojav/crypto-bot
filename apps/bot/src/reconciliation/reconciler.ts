@@ -107,9 +107,15 @@ export class Reconciler {
 
   private startBalanceSnapshots(): void {
     const snap = () =>
-      this.takeBalanceSnapshot().catch((err: unknown) =>
-        console.error("[reconciler] balance snapshot error:", err)
-      );
+      this.takeBalanceSnapshot().catch((err: unknown) => {
+        // Strip requestOptions (contains API key/secret) before logging
+        if (err !== null && typeof err === "object" && "requestOptions" in err) {
+          const { requestOptions: _omit, ...safe } = err as Record<string, unknown>;
+          console.error("[reconciler] balance snapshot error:", safe);
+        } else {
+          console.error("[reconciler] balance snapshot error:", err);
+        }
+      });
     snap();
     this.balanceTimer = setInterval(snap, 60_000);
   }
