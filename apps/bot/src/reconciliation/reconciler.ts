@@ -80,6 +80,13 @@ export class Reconciler {
 
     ws.on("exception", (data: unknown) => {
       console.error("[reconciler] WS exception:", data);
+      // 403/401 = auth failure (bad key or IP restriction) — retrying won't help, stop the loop
+      const msg = (data as { message?: string })?.message ?? "";
+      if (msg.includes("403") || msg.includes("401")) {
+        console.error("[reconciler] auth error — stopping WebSocket retries. Check BYBIT_API_KEY and IP restrictions on the testnet key.");
+        this.ws?.closeAll();
+        this.ws = null;
+      }
     });
 
     ws.subscribeV5(["position", "order", "wallet"], "linear");
