@@ -79,20 +79,31 @@ export class Reconciler {
     });
 
     ws.on("exception", (data: unknown) => {
-      console.error("[reconciler] WS exception:", data);
-      // 403/401 = auth failure (bad key or IP restriction) — retrying won't help, stop the loop
       const msg = (data as { message?: string })?.message ?? "";
+      // 403/401 = auth failure — SDK will keep retrying internally, but we silence
+      // further log spam and tear down so the bot process stays alive
       if (msg.includes("403") || msg.includes("401")) {
-        console.error("[reconciler] auth error — stopping WebSocket retries. Check BYBIT_API_KEY and IP restrictions on the testnet key.");
-        this.ws?.closeAll();
-        this.ws = null;
+        if (!this.wsAuthFailed) {
+          this.wsAuthFailed = true;
+          console.error(
+            "[reconciler] Bybit private WS auth failed (403/401). " +
+            "Check BYBIT_API_KEY, BYBIT_API_SECRET, and API key permissions (Derivatives Trading required). " +
+            "Bot continues running — webhook signals still work. WS reconciliation disabled."
+          );
+          ws.closeAll();
+          this.ws = null;
+        }
+        return;
       }
+      console.error("[reconciler] WS exception:", data);
     });
 
     ws.subscribeV5(["position", "order", "wallet"], "linear");
     this.ws = ws;
     console.log("[reconciler] subscribed to position/order/wallet");
   }
+
+  private wsAuthFailed = false;
 
   private startBalanceSnapshots(): void {
     const snap = () =>
