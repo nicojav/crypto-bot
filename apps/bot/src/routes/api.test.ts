@@ -273,6 +273,65 @@ describe("POST /api/kill-switch", () => {
   });
 });
 
+// ── POST /api/bots ────────────────────────────────────────────────────────────
+
+describe("POST /api/bots", () => {
+  it("minimal body (name + symbol) → 201 with correct defaults", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/bots", headers: AUTH,
+      payload: { name: "New Bot", symbol: "SOLUSDT" },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json<{ id: number; name: string; symbol: string; dryRun: boolean; enabled: boolean; maxPositionUsd: number; maxLeverage: number; dailyLossLimitUsd: number; openTradeCount: number }>();
+    expect(body.name).toBe("New Bot");
+    expect(body.symbol).toBe("SOLUSDT");
+    expect(body.enabled).toBe(true);
+    expect(body.dryRun).toBe(true);
+    expect(body.maxPositionUsd).toBe(100);
+    expect(body.maxLeverage).toBe(10);
+    expect(body.dailyLossLimitUsd).toBe(-500);
+    expect(body.openTradeCount).toBe(0);
+    await testDb.bot.delete({ where: { id: body.id } });
+  });
+
+  it("full body → 201 with provided values", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/bots", headers: AUTH,
+      payload: { name: "Full Bot", symbol: "ETHUSDT", enabled: false, dryRun: false, maxPositionUsd: 500, maxLeverage: 5, dailyLossLimitUsd: -100 },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json<{ id: number; enabled: boolean; dryRun: boolean; maxPositionUsd: number }>();
+    expect(body.enabled).toBe(false);
+    expect(body.dryRun).toBe(false);
+    expect(body.maxPositionUsd).toBe(500);
+    await testDb.bot.delete({ where: { id: body.id } });
+  });
+
+  it("missing name → 400", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/bots", headers: AUTH,
+      payload: { symbol: "BTCUSDT" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("missing symbol → 400", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/bots", headers: AUTH,
+      payload: { name: "No Symbol Bot" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("no auth → 401", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/bots",
+      payload: { name: "Unauth Bot", symbol: "BTCUSDT" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
 // ── CORS ─────────────────────────────────────────────────────────────────────
 
 describe("CORS", () => {

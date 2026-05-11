@@ -1,33 +1,6 @@
 import type { FC } from "react";
 import type { Bot } from "../api/client";
-
-interface ToggleProps {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  colorOn?: "green" | "amber";
-}
-
-const Toggle: FC<ToggleProps> = ({ checked, onChange, colorOn = "green" }) => {
-  const trackOn = colorOn === "green" ? "bg-green" : "bg-amber";
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={[
-        "inline-flex items-center h-6 w-11 rounded-full px-[3px] transition-colors duration-200 shrink-0 focus:outline-none cursor-pointer",
-        checked ? trackOn : "bg-border",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "block h-[18px] w-[18px] rounded-full bg-white shadow transition-transform duration-200",
-          checked ? "translate-x-[17px]" : "translate-x-0",
-        ].join(" ")}
-      />
-    </button>
-  );
-};
+import { Switch } from "./ui/Switch";
 
 interface BotCardProps {
   bot: Bot;
@@ -65,11 +38,11 @@ export const BotCard: FC<BotCardProps> = ({ bot, onToggle, onToggleDryRun, onEdi
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between">
         <span className="text-sm text-text-2">Live trading</span>
-        <Toggle checked={bot.enabled} onChange={(v) => onToggle(bot.id, v)} colorOn="green" />
+        <Switch checked={bot.enabled} onChange={(v) => onToggle(bot.id, v)} colorOn="green" />
       </div>
       <div className="flex items-center justify-between">
         <span className="text-sm text-text-2">Dry run</span>
-        <Toggle checked={bot.dryRun} onChange={(v) => onToggleDryRun(bot.id, v)} colorOn="amber" />
+        <Switch checked={bot.dryRun} onChange={(v) => onToggleDryRun(bot.id, v)} colorOn="amber" />
       </div>
     </div>
 

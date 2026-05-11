@@ -7,6 +7,7 @@ import { Header } from "./components/Header";
 import { BotCard } from "./components/BotCard";
 import { KillSwitchDialog } from "./components/KillSwitchDialog";
 import { EditBotDialog } from "./components/EditBotDialog";
+import { CreateBotDialog } from "./components/CreateBotDialog";
 import { EquityChart } from "./components/EquityChart";
 import { SignalsTable } from "./components/SignalsTable";
 import { TradesTable } from "./components/TradesTable";
@@ -19,6 +20,7 @@ export default function App() {
   const qc = useQueryClient();
   const [killDialogOpen, setKillDialogOpen] = useState(false);
   const [editBot, setEditBot] = useState<Bot | null>(null);
+  const [createBotOpen, setCreateBotOpen] = useState(false);
 
   const { data: bots = [], isError: botsError, error: botsErrorMsg } = useQuery({
     queryKey: ["bots"],
@@ -93,7 +95,15 @@ export default function App() {
         <section>
           <div className="flex items-center justify-between mb-4">
             <h2 className="font-semibold text-text-1">Bots</h2>
-            <span className="text-text-2 text-xs">{bots.length} configured</span>
+            <div className="flex items-center gap-3">
+              <span className="text-text-2 text-xs">{bots.length} configured</span>
+              <button
+                onClick={() => setCreateBotOpen(true)}
+                className="text-xs font-medium px-3 py-1.5 rounded-lg bg-green text-white hover:bg-green-dim transition-colors"
+              >
+                + New Bot
+              </button>
+            </div>
           </div>
           {botsError ? (
             <div className="bg-card border border-red/20 rounded-[14px] p-6 text-red text-sm text-center">
@@ -139,6 +149,11 @@ export default function App() {
           onClose={() => setEditBot(null)}
         />
       )}
+
+      <CreateBotDialog
+        open={createBotOpen}
+        onClose={() => setCreateBotOpen(false)}
+      />
     </div>
   );
 }

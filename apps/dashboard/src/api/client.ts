@@ -72,6 +72,16 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const fetchBots = () => req<Bot[]>("/api/bots");
 
+export const createBot = (data: {
+  name: string;
+  symbol: string;
+  enabled?: boolean;
+  dryRun?: boolean;
+  maxPositionUsd?: number;
+  maxLeverage?: number;
+  dailyLossLimitUsd?: number;
+}) => req<Bot>("/api/bots", { method: "POST", body: JSON.stringify(data) });
+
 export const patchBot = (
   id: number,
   data: Partial<Pick<Bot, "enabled" | "dryRun" | "maxPositionUsd" | "maxLeverage" | "dailyLossLimitUsd">>,

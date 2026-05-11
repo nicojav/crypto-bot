@@ -97,6 +97,16 @@ const errorSchema = {
 
 interface IdParams { id: number }
 
+interface CreateBotBody {
+  name: string;
+  symbol: string;
+  enabled?: boolean;
+  dryRun?: boolean;
+  maxPositionUsd?: number;
+  maxLeverage?: number;
+  dailyLossLimitUsd?: number;
+}
+
 interface PatchBotBody {
   enabled?: boolean;
   dryRun?: boolean;
@@ -171,6 +181,41 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastif
       createdAt: b.createdAt.toISOString(),
       openTradeCount: b._count.trades,
     }));
+  });
+
+  // POST /api/bots
+  fastify.post<{ Body: CreateBotBody }>("/api/bots", {
+    schema: {
+      body: {
+        type: "object",
+        required: ["name", "symbol"],
+        additionalProperties: false,
+        properties: {
+          name:              { type: "string", minLength: 1 },
+          symbol:            { type: "string", minLength: 1 },
+          enabled:           { type: "boolean" },
+          dryRun:            { type: "boolean" },
+          maxPositionUsd:    { type: "number", exclusiveMinimum: 0 },
+          maxLeverage:       { type: "integer", minimum: 1 },
+          dailyLossLimitUsd: { type: "number" },
+        },
+      },
+      response: { 201: botListItem },
+    },
+  }, async (req, reply) => {
+    const bot = await db.bot.create({ data: req.body });
+    return reply.status(201).send({
+      id: bot.id,
+      name: bot.name,
+      symbol: bot.symbol,
+      enabled: bot.enabled,
+      dryRun: bot.dryRun,
+      maxPositionUsd: bot.maxPositionUsd,
+      maxLeverage: bot.maxLeverage,
+      dailyLossLimitUsd: bot.dailyLossLimitUsd,
+      createdAt: bot.createdAt.toISOString(),
+      openTradeCount: 0,
+    });
   });
 
   // GET /api/bots/:id
