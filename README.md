@@ -45,6 +45,21 @@ The bot starts on **http://localhost:3000** and the dashboard on **http://localh
 | `npm run test` | Run bot unit tests (Vitest) |
 | `npm run format` | Auto-format with Prettier |
 
+## Bot modes
+
+Each bot row in the database has a `dryRun` flag that controls how signals are executed:
+
+| Mode | `dryRun` | `BYBIT_TESTNET` | What happens |
+|------|----------|-----------------|--------------|
+| **Dry-run** | `true` | any | Signal processed, fake trade recorded in DB, **no order sent to Bybit** |
+| **Testnet** | `false` | `true` | Real order placed on Bybit **testnet** (fake money, real API) |
+| **Live** | `false` | `false` | Real order placed on Bybit **live** (real money) |
+
+**Recommended progression:**
+1. Start with `dryRun: true` — verify the full TradingView → webhook → dashboard pipeline works
+2. Switch to `dryRun: false` + `BYBIT_TESTNET=true` — watch real testnet orders appear in your Bybit account
+3. Only set `BYBIT_TESTNET=false` when you're confident everything is working correctly
+
 ## Environment variables
 
 See `apps/bot/.env.example` and `apps/dashboard/.env.example` for full documentation of every variable.
