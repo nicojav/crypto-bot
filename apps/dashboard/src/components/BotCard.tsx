@@ -68,7 +68,7 @@ export const BotCard: FC<BotCardProps> = ({ bot, onToggle, onToggleDryRun, onEdi
     {/* Toggles */}
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between">
-        <span className="text-sm text-text-2">Live trading</span>
+        <span className="text-sm text-text-2">Enabled</span>
         <Switch checked={bot.enabled} onChange={(v) => onToggle(bot.id, v)} colorOn="green" />
       </div>
       <div className="flex items-center justify-between">
