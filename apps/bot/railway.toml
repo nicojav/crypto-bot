@@ -3,7 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "npm run build --workspace apps/bot"
 
 [deploy]
-startCommand = "npm run migrate:deploy --workspace apps/bot && npm start --workspace apps/bot"
+startCommand = "npm run migrate:deploy --workspace apps/bot && exec node apps/bot/dist/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
