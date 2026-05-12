@@ -1,6 +1,8 @@
-import type { FC } from "react";
+import { type FC, useState, useCallback } from "react";
 import type { Bot } from "../api/client";
 import { Switch } from "./ui/Switch";
+
+const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
 
 interface BotCardProps {
   bot: Bot;
@@ -11,7 +13,17 @@ interface BotCardProps {
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
-export const BotCard: FC<BotCardProps> = ({ bot, onToggle, onToggleDryRun, onEdit }) => (
+export const BotCard: FC<BotCardProps> = ({ bot, onToggle, onToggleDryRun, onEdit }) => {
+  const [copied, setCopied] = useState(false);
+
+  const copyWebhook = useCallback(() => {
+    void navigator.clipboard.writeText(`${API_URL}/webhook/${bot.id}`).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [bot.id]);
+
+  return (
   <div className="bg-card border border-border rounded-[14px] p-4 flex flex-col gap-4 animate-slide-up hover:border-border-bright transition-colors">
 
     {/* Top row */}
@@ -20,18 +32,37 @@ export const BotCard: FC<BotCardProps> = ({ bot, onToggle, onToggleDryRun, onEdi
         <div className={`w-2 h-2 rounded-full mt-0.5 shrink-0 ${bot.enabled ? "bg-green" : "bg-text-3"}`} />
         <div>
           <div className="font-semibold text-sm text-text-1">{bot.name}</div>
-          <div className="font-mono text-xs text-text-2 mt-0.5">{bot.symbol}</div>
+          <div className="font-mono text-xs text-text-2 mt-0.5">{bot.symbol} · <span className="text-text-3">#{bot.id}</span></div>
         </div>
       </div>
-      <button
-        onClick={() => onEdit(bot)}
-        aria-label="Edit bot"
-        className="w-7 h-7 rounded-lg flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-surface transition-colors"
-      >
-        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-          <path d="M9 2l2 2-6.5 6.5L2 11l.5-2.5L9 2z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={copyWebhook}
+          aria-label="Copy webhook URL"
+          title={`Copy webhook URL: ${API_URL}/webhook/${bot.id}`}
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-surface transition-colors"
+        >
+          {copied ? (
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+              <path d="M2 7l3 3 6-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+              <rect x="4.5" y="1" width="7.5" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+              <path d="M1 4.5h3M1 4.5v7a1.5 1.5 0 001.5 1.5H8.5v-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
+          )}
+        </button>
+        <button
+          onClick={() => onEdit(bot)}
+          aria-label="Edit bot"
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-surface transition-colors"
+        >
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+            <path d="M9 2l2 2-6.5 6.5L2 11l.5-2.5L9 2z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     {/* Toggles */}
@@ -60,4 +91,5 @@ export const BotCard: FC<BotCardProps> = ({ bot, onToggle, onToggleDryRun, onEdi
       </div>
     </div>
   </div>
-);
+  );
+};

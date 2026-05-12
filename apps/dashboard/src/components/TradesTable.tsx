@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { fetchTrades, type Trade } from "../api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchTrades, type Trade, type Bot } from "../api/client";
 
 const fmtTime = new Intl.DateTimeFormat("en-US", {
   month: "short", day: "numeric",
@@ -8,17 +8,16 @@ const fmtTime = new Intl.DateTimeFormat("en-US", {
 const fmtUsd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
 const fmtQty = new Intl.NumberFormat("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 6 });
 
-const STATUS_STYLE: Record<string, string> = {
-  OPEN:   "bg-blue-500/10 text-blue-400",
-  CLOSED: "bg-surface text-text-3",
-};
-
 export function TradesTable() {
+  const qc = useQueryClient();
   const { data: trades = [], isLoading } = useQuery<Trade[]>({
     queryKey: ["trades"],
     queryFn: () => fetchTrades({ limit: 50 }),
     staleTime: 30_000,
   });
+
+  const bots = qc.getQueryData<Bot[]>(["bots"]) ?? [];
+  const botName = (botId: number) => bots.find((b) => b.id === botId)?.name ?? `#${botId}`;
 
   return (
     <div className="bg-card border border-border rounded-[14px] flex flex-col overflow-hidden">
@@ -37,8 +36,9 @@ export function TradesTable() {
             <thead>
               <tr className="border-b border-border">
                 <th className="data-label px-5 py-3 text-left font-normal">Opened</th>
+                <th className="data-label px-4 py-3 text-left font-normal">Bot</th>
                 <th className="data-label px-4 py-3 text-left font-normal">Symbol</th>
-                <th className="data-label px-4 py-3 text-left font-normal">Side</th>
+                <th className="data-label px-4 py-3 text-left font-normal">Direction</th>
                 <th className="data-label px-4 py-3 text-right font-normal">Entry / Qty</th>
                 <th className="data-label px-5 py-3 text-right font-normal">PnL</th>
               </tr>
@@ -49,9 +49,12 @@ export function TradesTable() {
                   <td className="px-5 py-3 font-mono text-xs text-text-2 whitespace-nowrap">
                     {fmtTime.format(new Date(t.openedAt))}
                   </td>
+                  <td className="px-4 py-3 text-xs text-text-2 whitespace-nowrap">
+                    {botName(t.botId)}
+                  </td>
                   <td className="px-4 py-3 font-mono text-xs text-text-2">{t.symbol}</td>
                   <td className={`px-4 py-3 text-xs font-semibold ${t.side === "BUY" ? "text-green" : "text-red"}`}>
-                    {t.side}
+                    {t.side === "BUY" ? "Long" : "Short"}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="font-mono text-xs text-text-1">{fmtUsd.format(t.entryPrice)}</div>
@@ -62,7 +65,7 @@ export function TradesTable() {
                     t.pnlUsd >= 0 ? "text-green" : "text-red"
                   }`}>
                     {t.pnlUsd === null
-                      ? <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[t.status] ?? "bg-surface text-text-3"}`}>{t.status.toLowerCase()}</span>
+                      ? "—"
                       : `${t.pnlUsd >= 0 ? "+" : ""}${fmtUsd.format(t.pnlUsd)}`}
                   </td>
                 </tr>
