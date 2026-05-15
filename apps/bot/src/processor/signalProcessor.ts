@@ -12,8 +12,8 @@ export interface Exchange {
   placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean }): Promise<string>;
 }
 
-function calcQty(maxUsd: number, markPrice: number, lotSize: number): number {
-  const steps = Math.floor(maxUsd / markPrice / lotSize);
+function calcQty(maxUsd: number, leverage: number, markPrice: number, lotSize: number): number {
+  const steps = Math.floor(maxUsd * leverage / markPrice / lotSize);
   return steps * lotSize;
 }
 
@@ -142,7 +142,7 @@ export class SignalProcessor {
       return;
     }
 
-    const qty = calcQty(bot.maxPositionUsd, price, 0.001);
+    const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, price, 0.001);
     const [, trade] = await this.db.$transaction([
       this.db.signal.update({
         where: { id: signal.id },
@@ -203,7 +203,7 @@ export class SignalProcessor {
 
     const instrument = await this.exchange.getInstrumentInfo(symbol);
     const markPrice = await this.exchange.getMarkPrice(symbol);
-    const qty = calcQty(bot.maxPositionUsd, markPrice, instrument.lotSize);
+    const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, markPrice, instrument.lotSize);
 
     if (qty < instrument.minQty) {
       await this.reject(signal.id, `Calculated qty ${qty} is below minQty ${instrument.minQty}`);

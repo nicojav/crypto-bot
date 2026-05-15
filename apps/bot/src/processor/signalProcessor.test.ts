@@ -111,7 +111,7 @@ describe("SignalProcessor", () => {
     expect(trade).not.toBeNull();
     expect(trade?.side).toBe("BUY");
     expect(trade?.exchangeOrderId).toBe("order-abc-123");
-    expect(trade?.qty).toBe(0.002); // floor(100 / 50000 / 0.001) * 0.001 = 2 * 0.001
+    expect(trade?.qty).toBe(0.01); // floor(100 * 5 / 50000 / 0.001) * 0.001 = 10 * 0.001
     expect(trade?.entryPrice).toBe(50000);
     expect(trade?.status).toBe("OPEN");
 
@@ -119,7 +119,7 @@ describe("SignalProcessor", () => {
     expect(exchange.placeMarketOrder).toHaveBeenCalledWith({
       symbol: "BTCUSDT",
       side: "Buy",
-      qty: 0.002,
+      qty: 0.01,
       reduceOnly: false,
     });
   });
