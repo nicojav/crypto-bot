@@ -210,7 +210,9 @@ export class SignalProcessor {
       return;
     }
 
-    await this.exchange.setLeverage(symbol, bot.maxLeverage);
+    await this.exchange.setLeverage(symbol, bot.maxLeverage).catch((err: unknown) => {
+      console.warn(`[processor] setLeverage failed — proceeding with order anyway:`, (err as Error).message);
+    });
     const side = signal.action === "BUY" ? "Buy" : "Sell";
     const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
 
