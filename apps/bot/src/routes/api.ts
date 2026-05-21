@@ -355,6 +355,45 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastif
     return snapshots.map((s) => ({ ...s, takenAt: s.takenAt.toISOString() }));
   });
 
+  // DELETE /api/reset-trade-data?confirm=true
+  // Wipes all Signals and Trades. Preserves Bots and BalanceSnapshots.
+  // Omit ?confirm=true for a dry-run (returns counts only, deletes nothing).
+  fastify.delete<{ Querystring: { confirm?: string } }>("/api/reset-trade-data", {
+    schema: {
+      querystring: {
+        type: "object",
+        properties: { confirm: { type: "string" } },
+      },
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            dryRun: { type: "boolean" },
+            trades: { type: "integer" },
+            signals: { type: "integer" },
+          },
+          required: ["dryRun", "trades", "signals"],
+        },
+      },
+    },
+  }, async (req) => {
+    const [trades, signals] = await Promise.all([
+      db.trade.count(),
+      db.signal.count(),
+    ]);
+
+    if (req.query.confirm !== "true") {
+      return { dryRun: true, trades, signals };
+    }
+
+    await db.$transaction([
+      db.trade.deleteMany({}),
+      db.signal.deleteMany({}),
+    ]);
+
+    return { dryRun: false, trades, signals };
+  });
+
   // POST /api/kill-switch
   fastify.post("/api/kill-switch", {
     schema: {
