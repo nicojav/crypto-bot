@@ -9,7 +9,8 @@
     "migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
-    "check-bybit": "tsx ../../scripts/check-bybit.ts"
+    "check-bybit": "tsx ../../scripts/check-bybit.ts",
+    "reset-trade-data": "tsx ../../scripts/reset-trade-data.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
