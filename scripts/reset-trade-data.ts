@@ -1,73 +1,69 @@
 #!/usr/bin/env tsx
 /**
  * Reset Signals and Trades for a clean strategy-testing slate.
+ * Calls the bot's HTTP endpoint — no DB access needed, works from anywhere.
  * Preserves Bot configs and BalanceSnapshots.
  *
- * Local (from apps/bot/):
- *   npm run reset-trade-data              # dry-run
- *   npm run reset-trade-data -- --confirm # actually delete
+ * Requires in apps/bot/.env:
+ *   BOT_URL=https://your-service.up.railway.app
+ *   API_TOKEN=your-token
  *
- * Railway shell:
- *   cd apps/bot && npm run reset-trade-data -- --confirm
+ * Usage:
+ *   npm run reset-trade-data              # dry-run (shows counts)
+ *   npm run reset-trade-data -- --confirm # actually delete
  */
 import dotenv from "dotenv";
 import { resolve } from "path";
 
-const BOT_ROOT = resolve(__dirname, "../apps/bot");
-
-// Local dev: load bot's .env. On Railway: env is already in process.env (no-op).
-dotenv.config({ path: resolve(BOT_ROOT, ".env") });
+dotenv.config({ path: resolve(__dirname, "../apps/bot/.env") });
 
 async function main() {
-  const { PrismaBetterSqlite3 } = await import("@prisma/adapter-better-sqlite3");
-  const { PrismaClient } = await import("../apps/bot/src/generated/prisma/client.js");
+  const botUrl = process.env.BOT_URL?.replace(/\/$/, "");
+  const apiToken = process.env.API_TOKEN;
 
-  // Resolve relative SQLite paths (file:./dev.db) against apps/bot/ so the
-  // script works regardless of which directory it's invoked from.
-  const rawUrl = process.env.DATABASE_URL ?? "file:./dev.db";
-  const databaseUrl = rawUrl.startsWith("file:./") || rawUrl.startsWith("file:../")
-    ? `file:${resolve(BOT_ROOT, rawUrl.replace(/^file:/, ""))}`
-    : rawUrl;
-
-  const adapter = new PrismaBetterSqlite3({ url: databaseUrl });
-  const prisma = new PrismaClient({ adapter });
-
-  const confirm = process.argv.includes("--confirm");
-
-  const [trades, signals, bots, balances] = await Promise.all([
-    prisma.trade.count(),
-    prisma.signal.count(),
-    prisma.bot.count(),
-    prisma.balanceSnapshot.count(),
-  ]);
-
-  console.log("=== Reset Trade Data ===");
-  console.log(`Database: ${databaseUrl}`);
-  console.log();
-  console.log("Current row counts:");
-  console.log(`  Trades:           ${trades}  (will be deleted)`);
-  console.log(`  Signals:          ${signals}  (will be deleted)`);
-  console.log(`  Bots:             ${bots}  (preserved)`);
-  console.log(`  BalanceSnapshots: ${balances}  (preserved)`);
-  console.log();
-
-  if (!confirm) {
-    console.log("DRY RUN — re-run with --confirm to delete.");
-    await prisma.$disconnect();
-    return;
+  if (!botUrl) {
+    console.error("Missing BOT_URL in apps/bot/.env (e.g. https://your-service.up.railway.app)");
+    process.exit(1);
+  }
+  if (!apiToken) {
+    console.error("Missing API_TOKEN in apps/bot/.env");
+    process.exit(1);
   }
 
-  // Trade has FK to Signal; delete trades first.
-  const [deletedTrades, deletedSignals] = await prisma.$transaction([
-    prisma.trade.deleteMany({}),
-    prisma.signal.deleteMany({}),
-  ]);
+  const confirm = process.argv.includes("--confirm");
+  const url = `${botUrl}/api/reset-trade-data${confirm ? "?confirm=true" : ""}`;
 
-  console.log(`Deleted ${deletedTrades.count} trade(s).`);
-  console.log(`Deleted ${deletedSignals.count} signal(s).`);
-  console.log("Done.");
+  console.log("=== Reset Trade Data ===");
+  console.log(`Target: ${botUrl}`);
+  console.log(`Mode:   ${confirm ? "CONFIRM — will delete" : "DRY RUN — no changes"}`);
+  console.log();
 
-  await prisma.$disconnect();
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${apiToken}` },
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`HTTP ${res.status}: ${body}`);
+    process.exit(1);
+  }
+
+  const data = await res.json() as { dryRun: boolean; trades: number; signals: number };
+
+  if (data.dryRun) {
+    console.log(`Would delete:`);
+    console.log(`  Trades:  ${data.trades}`);
+    console.log(`  Signals: ${data.signals}`);
+    console.log();
+    console.log("Re-run with --confirm to delete.");
+  } else {
+    console.log(`Deleted:`);
+    console.log(`  Trades:  ${data.trades}`);
+    console.log(`  Signals: ${data.signals}`);
+    console.log();
+    console.log("Done. Clean slate.");
+  }
 }
 
 main().catch((err: unknown) => {
