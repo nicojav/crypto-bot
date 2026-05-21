@@ -45,6 +45,14 @@ The bot starts on **http://localhost:3000** and the dashboard on **http://localh
 | `npm run test` | Run bot unit tests (Vitest) |
 | `npm run format` | Auto-format with Prettier |
 
+**Bot-specific scripts** (run from `apps/bot/` or with `--workspace apps/bot`):
+
+| Command | Description |
+|---------|-------------|
+| `npm run check-bybit` | Verify Bybit API connectivity, balance, and positions |
+| `npm run reset-trade-data` | Dry-run: show how many trades/signals would be wiped |
+| `npm run reset-trade-data -- --confirm` | Wipe all trades and signals on the deployed bot (preserves bots and balance history) |
+
 ## Bot modes
 
 Each bot row in the database has a `dryRun` flag that controls how signals are executed:
@@ -62,4 +70,25 @@ Each bot row in the database has a `dryRun` flag that controls how signals are e
 
 ## Environment variables
 
+| File | Purpose | Committed? |
+|------|---------|-----------|
+| `apps/bot/.env` | Local dev — testnet keys, local DB, dev token | No |
+| `apps/bot/.env.production` | Production scripts — Railway URL + prod API token | No |
+| `apps/dashboard/.env` | Local dev — points dashboard at localhost bot | No |
+
 See `apps/bot/.env.example` and `apps/dashboard/.env.example` for full documentation of every variable.
+
+### Setting up `.env.production`
+
+Required before running any script that targets the deployed Railway service:
+
+```bash
+# 1. Get your production API token from Railway
+railway run --service service-exchange-bot -- printenv API_TOKEN
+
+# 2. Create the file (it's gitignored)
+cat > apps/bot/.env.production << EOF
+BOT_URL=https://your-service.up.railway.app
+API_TOKEN=<paste token here>
+EOF
+```

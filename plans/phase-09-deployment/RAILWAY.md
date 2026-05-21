@@ -153,6 +153,51 @@ Then open the dashboard URL → bots list loads → WebSocket connects (check De
 
 ---
 
+## Admin operations
+
+### Local scripts setup
+
+Scripts that target the deployed bot (e.g. `reset-trade-data`) read from `apps/bot/.env.production`. Create it once — it's gitignored:
+
+```bash
+# Get the production API token
+railway run --service service-exchange-bot -- printenv API_TOKEN
+
+# Create the file
+cat > apps/bot/.env.production << EOF
+BOT_URL=https://your-service.up.railway.app
+API_TOKEN=<paste token here>
+EOF
+```
+
+### Reset trades and signals
+
+Use this when you want a clean slate for strategy testing (e.g. after fixing a bug, before a new backtest period). Preserves bot configs and balance history.
+
+```bash
+# Dry-run — shows counts, deletes nothing
+npm run reset-trade-data --workspace apps/bot
+
+# Wipe all trades and signals
+npm run reset-trade-data --workspace apps/bot -- --confirm
+```
+
+Or directly via curl:
+
+```bash
+# Dry-run
+curl -X DELETE https://<bot>.up.railway.app/api/reset-trade-data \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+# Wipe
+curl -X DELETE "https://<bot>.up.railway.app/api/reset-trade-data?confirm=true" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+Response: `{"dryRun":false,"trades":70,"signals":189}`
+
+---
+
 ## Known limitations / tech debt
 
 See `memory/project_deployment_tech_debt.md` for the full list. Short version:
