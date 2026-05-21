@@ -13,14 +13,22 @@
 import dotenv from "dotenv";
 import { resolve } from "path";
 
+const BOT_ROOT = resolve(__dirname, "../apps/bot");
+
 // Local dev: load bot's .env. On Railway: env is already in process.env (no-op).
-dotenv.config({ path: resolve(__dirname, "../apps/bot/.env") });
+dotenv.config({ path: resolve(BOT_ROOT, ".env") });
 
 async function main() {
   const { PrismaBetterSqlite3 } = await import("@prisma/adapter-better-sqlite3");
   const { PrismaClient } = await import("../apps/bot/src/generated/prisma/client.js");
 
-  const databaseUrl = process.env.DATABASE_URL ?? "file:./dev.db";
+  // Resolve relative SQLite paths (file:./dev.db) against apps/bot/ so the
+  // script works regardless of which directory it's invoked from.
+  const rawUrl = process.env.DATABASE_URL ?? "file:./dev.db";
+  const databaseUrl = rawUrl.startsWith("file:./") || rawUrl.startsWith("file:../")
+    ? `file:${resolve(BOT_ROOT, rawUrl.replace(/^file:/, ""))}`
+    : rawUrl;
+
   const adapter = new PrismaBetterSqlite3({ url: databaseUrl });
   const prisma = new PrismaClient({ adapter });
 
