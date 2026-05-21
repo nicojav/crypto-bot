@@ -234,7 +234,7 @@ export class SignalProcessor {
           return;
         }
       } else if (oppositePos) {
-        console.warn(`[processor] divergence: DB has OPEN ${existing[0].side} trade(s) for ${symbol} but exchange has same-side ${oppositePos.side} position — closing DB rows only`);
+        console.warn(`[processor] divergence: DB has OPEN ${existing[0]?.side ?? "?"} trade(s) for ${symbol} but exchange has same-side ${oppositePos.side} position — closing DB rows only`);
       } else {
         console.warn(`[processor] reversal: DB has OPEN trade for ${symbol} but exchange has no position — closing DB only`);
       }
