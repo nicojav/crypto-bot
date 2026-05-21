@@ -106,6 +106,27 @@ export class SignalProcessor {
     return null;
   }
 
+  private async closeOpenTradesInDb(botId: number, symbol: string, exitPrice: number, prefetched?: Trade[]): Promise<Trade[]> {
+    const openTrades = prefetched ?? await this.db.trade.findMany({
+      where: { botId, symbol, status: "OPEN" },
+    });
+    if (openTrades.length === 0) return [];
+    const now = new Date();
+    const withPnl = openTrades.map((t) => ({ trade: t, pnlUsd: pnlForTrade(t, exitPrice) }));
+    await this.db.$transaction(
+      withPnl.map(({ trade, pnlUsd }) =>
+        this.db.trade.update({
+          where: { id: trade.id },
+          data: { status: "CLOSED", exitPrice, pnlUsd, closedAt: now },
+        })
+      )
+    );
+    for (const { trade, pnlUsd } of withPnl) {
+      this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd } });
+    }
+    return openTrades;
+  }
+
   private async processDryRun(
     signal: SignalWithBot,
     bot: Bot,
@@ -115,31 +136,19 @@ export class SignalProcessor {
     console.log(`[processor] dry-run ${signal.action} ${symbol} @ ~${price} USD (bot ${bot.id})`);
 
     if (signal.action === "CLOSE") {
-      const openTrades = await this.db.trade.findMany({
-        where: { botId: bot.id, symbol, status: "OPEN" },
+      await this.closeOpenTradesInDb(bot.id, symbol, price);
+      await this.db.signal.update({
+        where: { id: signal.id },
+        data: { status: "EXECUTED", processedAt: new Date() },
       });
-      const now = new Date();
-      await this.db.$transaction([
-        ...openTrades.map((t) =>
-          this.db.trade.update({
-            where: { id: t.id },
-            data: {
-              status: "CLOSED",
-              exitPrice: price,
-              pnlUsd: pnlForTrade(t, price),
-              closedAt: now,
-            },
-          })
-        ),
-        this.db.signal.update({
-          where: { id: signal.id },
-          data: { status: "EXECUTED", processedAt: now },
-        }),
-      ]);
-      for (const t of openTrades) {
-        this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol, pnlUsd: pnlForTrade(t, price) } });
-      }
       return;
+    }
+
+    const existing = await this.db.trade.findMany({
+      where: { botId: bot.id, symbol, status: "OPEN" },
+    });
+    if (existing.some((t) => t.side !== signal.action)) {
+      await this.closeOpenTradesInDb(bot.id, symbol, price, existing);
     }
 
     const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, price, 0.001);
@@ -175,28 +184,11 @@ export class SignalProcessor {
       const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
       const orderId = await this.exchange.placeMarketOrder({ symbol, side: closeSide, qty: pos.size, reduceOnly: true });
       const markPrice = await this.exchange.getMarkPrice(symbol);
-      const openTrades = await this.db.trade.findMany({ where: { botId: bot.id, symbol, status: "OPEN" } });
-      const now = new Date();
-      await this.db.$transaction([
-        ...openTrades.map((t) =>
-          this.db.trade.update({
-            where: { id: t.id },
-            data: {
-              status: "CLOSED",
-              exitPrice: markPrice,
-              pnlUsd: pnlForTrade(t, markPrice),
-              closedAt: now,
-            },
-          })
-        ),
-        this.db.signal.update({
-          where: { id: signal.id },
-          data: { status: "EXECUTED", processedAt: now },
-        }),
-      ]);
-      for (const t of openTrades) {
-        this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol, pnlUsd: pnlForTrade(t, markPrice) } });
-      }
+      await this.closeOpenTradesInDb(bot.id, symbol, markPrice);
+      await this.db.signal.update({
+        where: { id: signal.id },
+        data: { status: "EXECUTED", processedAt: new Date() },
+      });
       console.log(`[processor] CLOSE ${symbol} orderId=${orderId} markPrice=${markPrice}`);
       return;
     }
@@ -213,7 +205,24 @@ export class SignalProcessor {
     await this.exchange.setLeverage(symbol, bot.maxLeverage).catch((err: unknown) => {
       console.warn(`[processor] setLeverage failed — proceeding with order anyway:`, (err as Error).message);
     });
+
     const side = signal.action === "BUY" ? "Buy" : "Sell";
+
+    const existing = await this.db.trade.findMany({
+      where: { botId: bot.id, symbol, status: "OPEN" },
+    });
+    if (existing.some((t) => t.side !== signal.action)) {
+      const positions = await this.exchange.getPositions(symbol);
+      const oppositePos = positions.find((p) => p.size > 0);
+      if (oppositePos) {
+        await this.exchange.placeMarketOrder({ symbol, side, qty: oppositePos.size, reduceOnly: true });
+      } else {
+        console.warn(`[processor] reversal: DB has OPEN trade for ${symbol} but exchange has no position — closing DB only`);
+      }
+      const closePrice = await this.exchange.getMarkPrice(symbol);
+      await this.closeOpenTradesInDb(bot.id, symbol, closePrice, existing);
+    }
+
     const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
 
     const [, liveTrade] = await this.db.$transaction([
