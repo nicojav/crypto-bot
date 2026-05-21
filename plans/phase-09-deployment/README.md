@@ -1,6 +1,6 @@
 # Phase 9 — Deployment
 
-**Status:** Pending
+**Status:** Complete — deployed via Railway path on 2026-05-08. See [RAILWAY.md](RAILWAY.md) for the executed plan. The VPS recipe below is preserved as the alternative path for future reference.
 
 ## Goal
 
