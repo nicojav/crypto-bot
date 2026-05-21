@@ -45,13 +45,13 @@ The bot starts on **http://localhost:3000** and the dashboard on **http://localh
 | `npm run test` | Run bot unit tests (Vitest) |
 | `npm run format` | Auto-format with Prettier |
 
-**Bot-specific scripts** (run from `apps/bot/` or with `--workspace apps/bot`):
+**Bot-specific scripts:**
 
 | Command | Description |
 |---------|-------------|
-| `npm run check-bybit` | Verify Bybit API connectivity, balance, and positions |
-| `npm run reset-trade-data` | Dry-run: show how many trades/signals would be wiped |
-| `npm run reset-trade-data -- --confirm` | Wipe all trades and signals on the deployed bot (preserves bots and balance history) |
+| `npm run check-bybit --workspace apps/bot` | Verify Bybit API connectivity, balance, and positions |
+| `npm run reset-trade-data --workspace apps/bot` | Dry-run: show how many trades/signals would be wiped |
+| `npm run reset-trade-data --workspace apps/bot -- --confirm` | Wipe all trades and signals on the deployed bot (preserves bots and balance history) |
 
 ## Bot modes
 
