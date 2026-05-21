@@ -12,9 +12,18 @@ export interface Exchange {
   placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean }): Promise<string>;
 }
 
-function calcQty(maxUsd: number, leverage: number, markPrice: number, lotSize: number): number {
+function decimalsOf(lotSize: number): number {
+  if (!Number.isFinite(lotSize) || lotSize <= 0) return 0;
+  const s = lotSize.toString();
+  if (s.includes("e-")) return Number(s.split("e-")[1]);
+  if (s.includes("e+")) return 0;
+  const dot = s.indexOf(".");
+  return dot === -1 ? 0 : s.length - dot - 1;
+}
+
+export function calcQty(maxUsd: number, leverage: number, markPrice: number, lotSize: number): number {
   const steps = Math.floor(maxUsd * leverage / markPrice / lotSize);
-  return steps * lotSize;
+  return Number((steps * lotSize).toFixed(decimalsOf(lotSize)));
 }
 
 function pnlForTrade(trade: Trade, exitPrice: number): number {
@@ -214,12 +223,22 @@ export class SignalProcessor {
     if (existing.some((t) => t.side !== signal.action)) {
       const positions = await this.exchange.getPositions(symbol);
       const oppositePos = positions.find((p) => p.size > 0);
-      if (oppositePos) {
-        await this.exchange.placeMarketOrder({ symbol, side, qty: oppositePos.size, reduceOnly: true });
+      const closePrice = await this.exchange.getMarkPrice(symbol);
+
+      if (oppositePos && oppositePos.side !== side) {
+        const closeSide = oppositePos.side === "Buy" ? "Sell" : "Buy";
+        try {
+          await this.exchange.placeMarketOrder({ symbol, side: closeSide, qty: oppositePos.size, reduceOnly: true });
+        } catch (err) {
+          await this.reject(signal.id, `Reduce-only close failed: ${(err as Error).message}`);
+          return;
+        }
+      } else if (oppositePos) {
+        console.warn(`[processor] divergence: DB has OPEN ${existing[0].side} trade(s) for ${symbol} but exchange has same-side ${oppositePos.side} position — closing DB rows only`);
       } else {
         console.warn(`[processor] reversal: DB has OPEN trade for ${symbol} but exchange has no position — closing DB only`);
       }
-      const closePrice = await this.exchange.getMarkPrice(symbol);
+
       await this.closeOpenTradesInDb(bot.id, symbol, closePrice, existing);
     }
 
