@@ -15,7 +15,8 @@
 import dotenv from "dotenv";
 import { resolve } from "path";
 
-dotenv.config({ path: resolve(__dirname, "../apps/bot/.env") });
+// Production vars (BOT_URL + API_TOKEN for the deployed service)
+dotenv.config({ path: resolve(__dirname, "../apps/bot/.env.production") });
 
 async function main() {
   const botUrl = process.env.BOT_URL?.replace(/\/$/, "");
