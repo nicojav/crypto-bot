@@ -14,6 +14,9 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1).default("file:./dev.db"),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
+  TELEGRAM_BOT_TOKEN: z.string().default(""),
+  TELEGRAM_CHAT_ID: z.string().default(""),
+  DAILY_SUMMARY_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(8),
 });
 
 const result = schema.safeParse(process.env);

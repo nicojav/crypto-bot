@@ -31,6 +31,7 @@ export class Reconciler {
   private ws: WebsocketClient | null = null;
   private balanceTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
+  private lastWsActivityAt = Date.now();
 
   constructor(
     private readonly db: PrismaClient,
@@ -66,13 +67,17 @@ export class Reconciler {
     });
 
     ws.on("update", (data: WsUpdateEvent) => {
+      this.lastWsActivityAt = Date.now();
       this.handleUpdate(data).catch((err: unknown) =>
         console.error("[reconciler] WS update error:", err)
       );
     });
 
     ws.on("reconnected", () => {
-      console.log("[reconciler] WS reconnected — running REST reconciliation");
+      const disconnectedMs = Date.now() - this.lastWsActivityAt;
+      this.lastWsActivityAt = Date.now();
+      console.log(`[reconciler] WS reconnected after ~${Math.round(disconnectedMs / 1000)}s — running REST reconciliation`);
+      this.bus?.publish({ type: "ws.reconnected", data: { disconnectedMs } });
       this.runReconciliation("reconnect").catch((err: unknown) =>
         console.error("[reconciler] post-reconnect reconciliation error:", err)
       );

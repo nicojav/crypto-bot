@@ -75,14 +75,14 @@ export class SignalProcessor {
 
     // Kill-switch applies to all actions; other risk checks skip CLOSE (reduces exposure)
     if (!bot.enabled) {
-      await this.reject(signal.id, "Bot is disabled (kill switch)");
+      await this.reject(signal.id, "Bot is disabled (kill switch)", bot.id);
       return;
     }
 
     if (signal.action !== "CLOSE") {
       const riskReject = await this.runRiskChecks(bot);
       if (riskReject) {
-        await this.reject(signal.id, riskReject);
+        await this.reject(signal.id, riskReject, bot.id);
         return;
       }
     }
@@ -95,7 +95,7 @@ export class SignalProcessor {
     try {
       await this.processLive(signal, bot, symbol);
     } catch (err: unknown) {
-      await this.reject(signal.id, err instanceof Error ? err.message : String(err));
+      await this.reject(signal.id, err instanceof Error ? err.message : String(err), bot.id);
     }
   }
 
@@ -187,7 +187,7 @@ export class SignalProcessor {
       const positions = await this.exchange.getPositions(symbol);
       const pos = positions.find((p) => p.size > 0);
       if (!pos) {
-        await this.reject(signal.id, "No open position to close");
+        await this.reject(signal.id, "No open position to close", bot.id);
         return;
       }
       const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
@@ -207,7 +207,7 @@ export class SignalProcessor {
     const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, markPrice, instrument.lotSize);
 
     if (qty < instrument.minQty) {
-      await this.reject(signal.id, `Calculated qty ${qty} is below minQty ${instrument.minQty}`);
+      await this.reject(signal.id, `Calculated qty ${qty} is below minQty ${instrument.minQty}`, bot.id);
       return;
     }
 
@@ -230,7 +230,7 @@ export class SignalProcessor {
         try {
           await this.exchange.placeMarketOrder({ symbol, side: closeSide, qty: oppositePos.size, reduceOnly: true });
         } catch (err) {
-          await this.reject(signal.id, `Reduce-only close failed: ${(err as Error).message}`);
+          await this.reject(signal.id, `Reduce-only close failed: ${(err as Error).message}`, bot.id);
           return;
         }
       } else if (oppositePos) {
@@ -266,11 +266,14 @@ export class SignalProcessor {
     console.log(`[processor] ${signal.action} ${qty} ${symbol} @ ~${markPrice} orderId=${orderId}`);
   }
 
-  private async reject(signalId: number, reason: string): Promise<void> {
+  private async reject(signalId: number, reason: string, botId?: number): Promise<void> {
     console.warn(`[processor] REJECT signal ${signalId}: ${reason}`);
     await this.db.signal.update({
       where: { id: signalId },
       data: { status: "REJECTED", rejectionReason: reason, processedAt: new Date() },
     });
+    if (botId != null) {
+      this.bus?.publish({ type: "signal.rejected", data: { signalId, botId, reason } });
+    }
   }
 }
