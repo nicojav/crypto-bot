@@ -48,12 +48,25 @@ model Trade {
   entryPrice       Float
   exitPrice        Float?
   pnlUsd           Float?
-  status           String    @default("OPEN") // OPEN | CLOSED
+  status           String    @default("OPEN") // OPEN | CLOSING | CLOSED
   openedAt         DateTime  @default(now())
   closedAt         DateTime?
 
+  // Accurate accounting fields — populated from Bybit execution/closedPnl APIs
+  entryFillPrice   Float?    // real avgPrice from opening executions
+  exitFillPrice    Float?    // real avgPrice from closing executions
+  feeOpenUsd       Float?
+  feeCloseUsd      Float?
+  realizedPnlUsd   Float?    // from Bybit closed-pnl (preferred) or computed from executions
+  fundingUsd       Float?
+  pnlSource        String?   // BYBIT_WS | EXEC_FALLBACK | BYBIT_LIQUIDATION
+  closingOrderId   String?
+
   bot              Bot       @relation(fields: [botId], references: [id])
   signal           Signal    @relation(fields: [signalId], references: [id])
+
+  @@index([symbol, status])
+  @@index([closingOrderId])
 }
 
 model BalanceSnapshot {
@@ -61,4 +74,15 @@ model BalanceSnapshot {
   equityUsd        Float
   availableUsd     Float
   takenAt          DateTime  @default(now())
+}
+
+model FundingEvent {
+  id          Int      @id @default(autoincrement())
+  symbol      String
+  fundingUsd  Float    // negative = paid out, positive = received
+  execTime    DateTime
+  execId      String   @unique
+  createdAt   DateTime @default(now())
+
+  @@index([symbol, execTime])
 }

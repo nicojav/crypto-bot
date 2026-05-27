@@ -288,9 +288,12 @@ describe("SignalProcessor", () => {
     expect(exchange.placeMarketOrder).toHaveBeenNthCalledWith(1, { symbol: "BTCUSDT", side: "Sell", qty: 0.01, reduceOnly: true });
     expect(exchange.placeMarketOrder).toHaveBeenNthCalledWith(2, expect.objectContaining({ side: "Sell", reduceOnly: false }));
 
+    // Reversal path: old trade is marked CLOSING (reconciler finalizes with real fill price)
     const closedTrade = await testDb.trade.findFirst({ where: { signalId: openSignal.id } });
-    expect(closedTrade?.status).toBe("CLOSED");
-    expect(closedTrade?.pnlUsd).not.toBeNull();
+    expect(closedTrade?.status).toBe("CLOSING");
+    expect(closedTrade?.closingOrderId).not.toBeNull();
+    // pnlUsd is null until reconciler receives the WS order fill
+    expect(closedTrade?.pnlUsd).toBeNull();
 
     const newTrade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
     expect(newTrade?.side).toBe("SELL");

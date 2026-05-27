@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { PrismaClient } from "../generated/prisma/client.js";
+import type { BybitClient } from "../exchange/bybit.js";
 import { env } from "../env.js";
 
 // ── Shared schemas ────────────────────────────────────────────────────────────
@@ -54,12 +55,51 @@ const tradeItem = {
     side: { type: "string" },
     qty: { type: "number" },
     entryPrice: { type: "number" },
+    entryFillPrice: { type: ["number", "null"] },
     exitPrice: { type: ["number", "null"] },
+    exitFillPrice: { type: ["number", "null"] },
     pnlUsd: { type: ["number", "null"] },
+    realizedPnlUsd: { type: ["number", "null"] },
+    feeOpenUsd: { type: ["number", "null"] },
+    feeCloseUsd: { type: ["number", "null"] },
+    pnlSource: { type: ["string", "null"] },
     status: { type: "string" },
     openedAt: { type: "string" },
     closedAt: { type: ["string", "null"] },
   },
+} as const;
+
+const positionItem = {
+  type: "object",
+  properties: {
+    tradeId: { type: "integer" },
+    botId: { type: "integer" },
+    symbol: { type: "string" },
+    side: { type: "string" },
+    qty: { type: "number" },
+    entryPrice: { type: "number" },
+    entryFillPrice: { type: ["number", "null"] },
+    markPrice: { type: ["number", "null"] },
+    unrealisedPnl: { type: ["number", "null"] },
+    feeOpenUsd: { type: ["number", "null"] },
+    status: { type: "string" },
+    openedAt: { type: "string" },
+  },
+} as const;
+
+const equitySummarySchema = {
+  type: "object",
+  properties: {
+    from: { type: "string" },
+    to: { type: "string" },
+    deltaEquityUsd: { type: "number" },
+    sumRealizedPnlUsd: { type: "number" },
+    sumFeeUsd: { type: "number" },
+    sumFundingUsd: { type: "number" },
+    residualUsd: { type: "number" },
+    tradeCount: { type: "integer" },
+  },
+  required: ["from", "to", "deltaEquityUsd", "sumRealizedPnlUsd", "sumFeeUsd", "sumFundingUsd", "residualUsd", "tradeCount"],
 } as const;
 
 const equityItem = {
@@ -143,7 +183,10 @@ function isPrismaNotFound(err: unknown): boolean {
   );
 }
 
-export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastify, { db }) => {
+// 5s in-memory cache for live Bybit positions (symbol → { data, expiresAt })
+const positionCache = new Map<string, { unrealisedPnl: number; markPrice: number; expiresAt: number }>();
+
+export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClient }> = async (fastify, { db, bybit }) => {
   fastify.setErrorHandler((err, _req, reply) => {
     if (err.validation) {
       return reply.status(400).send({ error: "Validation error", details: err.validation });
@@ -327,6 +370,8 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastif
     });
     return trades.map((t) => ({
       ...t,
+      // Use real Bybit PnL when available; fall back to legacy local estimate
+      pnlUsd: t.realizedPnlUsd ?? t.pnlUsd ?? null,
       openedAt: t.openedAt.toISOString(),
       closedAt: t.closedAt?.toISOString() ?? null,
     }));
@@ -353,6 +398,123 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (fastif
       orderBy: { takenAt: "asc" },
     });
     return snapshots.map((s) => ({ ...s, takenAt: s.takenAt.toISOString() }));
+  });
+
+  // GET /api/equity/summary?from&to
+  // Returns a decomposition of Δequity into realized PnL, fees, and residual.
+  fastify.get<{ Querystring: EquityQuery }>("/api/equity/summary", {
+    schema: {
+      querystring: {
+        type: "object",
+        properties: {
+          from: { type: "string" },
+          to: { type: "string" },
+        },
+      },
+      response: { 200: equitySummarySchema },
+    },
+  }, async (req) => {
+    const fromDate = req.query.from ? new Date(req.query.from) : new Date(new Date().setHours(0, 0, 0, 0));
+    const toDate = req.query.to ? new Date(req.query.to) : new Date();
+
+    const [snapshots, trades, fundingAgg] = await Promise.all([
+      db.balanceSnapshot.findMany({
+        where: { takenAt: { gte: fromDate, lte: toDate } },
+        orderBy: { takenAt: "asc" },
+      }),
+      db.trade.findMany({
+        where: {
+          status: "CLOSED",
+          closedAt: { gte: fromDate, lte: toDate },
+        },
+      }),
+      db.fundingEvent.aggregate({
+        _sum: { fundingUsd: true },
+        where: { execTime: { gte: fromDate, lte: toDate } },
+      }),
+    ]);
+
+    const firstSnap = snapshots[0];
+    const lastSnap = snapshots[snapshots.length - 1];
+    const deltaEquityUsd = firstSnap && lastSnap ? lastSnap.equityUsd - firstSnap.equityUsd : 0;
+
+    let sumRealizedPnlUsd = 0;
+    let sumFeeUsd = 0;
+    for (const t of trades) {
+      sumRealizedPnlUsd += t.realizedPnlUsd ?? t.pnlUsd ?? 0;
+      sumFeeUsd += (t.feeOpenUsd ?? 0) + (t.feeCloseUsd ?? 0);
+    }
+
+    const sumFundingUsd = fundingAgg._sum.fundingUsd ?? 0;
+
+    // residual ≈ Δequity − (realized − fees + funding) ≈ unrealizedPnl change + rounding
+    const residualUsd = deltaEquityUsd - (sumRealizedPnlUsd - sumFeeUsd + sumFundingUsd);
+
+    return {
+      from: fromDate.toISOString(),
+      to: toDate.toISOString(),
+      deltaEquityUsd,
+      sumRealizedPnlUsd,
+      sumFeeUsd,
+      sumFundingUsd,
+      residualUsd,
+      tradeCount: trades.length,
+    };
+  });
+
+  // GET /api/positions
+  // Returns all OPEN/CLOSING trades joined with live Bybit unrealized PnL.
+  fastify.get("/api/positions", {
+    schema: {
+      response: { 200: { type: "array", items: positionItem } },
+    },
+  }, async () => {
+    const openTrades = await db.trade.findMany({
+      where: { status: { in: ["OPEN", "CLOSING"] } },
+      orderBy: { openedAt: "desc" },
+    });
+
+    const symbols = [...new Set(openTrades.map((t) => t.symbol))];
+    const liveBySymbol = new Map<string, { unrealisedPnl: number; markPrice: number }>();
+
+    if (bybit) {
+      await Promise.all(
+        symbols.map(async (sym) => {
+          const cached = positionCache.get(sym);
+          if (cached && cached.expiresAt > Date.now()) {
+            liveBySymbol.set(sym, { unrealisedPnl: cached.unrealisedPnl, markPrice: cached.markPrice });
+            return;
+          }
+          try {
+            const positions = await bybit.getPositions(sym);
+            const pos = positions.find((p) => p.size > 0);
+            const entry = { unrealisedPnl: pos?.unrealisedPnl ?? 0, markPrice: pos?.entryPrice ?? 0 };
+            liveBySymbol.set(sym, entry);
+            positionCache.set(sym, { ...entry, expiresAt: Date.now() + 5_000 });
+          } catch {
+            // non-fatal: return without live data
+          }
+        })
+      );
+    }
+
+    return openTrades.map((t) => {
+      const live = liveBySymbol.get(t.symbol);
+      return {
+        tradeId: t.id,
+        botId: t.botId,
+        symbol: t.symbol,
+        side: t.side,
+        qty: t.qty,
+        entryPrice: t.entryPrice,
+        entryFillPrice: t.entryFillPrice ?? null,
+        markPrice: live?.markPrice ?? null,
+        unrealisedPnl: live?.unrealisedPnl ?? null,
+        feeOpenUsd: t.feeOpenUsd ?? null,
+        status: t.status,
+        openedAt: t.openedAt.toISOString(),
+      };
+    });
   });
 
   // DELETE /api/reset-trade-data?confirm=true

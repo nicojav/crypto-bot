@@ -39,6 +39,24 @@ function CustomTooltip({ active, payload }: any) {
       <div className="text-text-2 text-xs mb-2">{fmtFull.format(new Date(d.takenAt))}</div>
       <div className="font-mono font-medium text-text-1">{fmtUsd.format(d.equityUsd)}</div>
       <div className="font-mono text-xs text-text-2 mt-0.5">Available: {fmtUsd.format(d.availableUsd)}</div>
+      {d.equityUsd !== d.availableUsd && (
+        <div className="font-mono text-xs text-text-3 mt-0.5">
+          Unrealized: {fmtUsd.format(d.equityUsd - d.availableUsd)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InfoTooltip() {
+  return (
+    <div className="relative group">
+      <div className="w-4 h-4 rounded-full border border-border flex items-center justify-center text-text-3 text-[10px] cursor-help select-none">i</div>
+      <div className="absolute right-0 top-5 z-10 w-64 bg-card border border-border rounded-xl p-3 text-xs text-text-2 leading-relaxed shadow-xl opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity">
+        <span className="text-text-1 font-medium">Equity</span> = wallet + unrealized PnL − fees − funding.{" "}
+        <span className="text-text-1 font-medium">Available</span> = wallet balance only.{" "}
+        The closed-trades table shows realized PnL; the two won&apos;t match while a position is open.
+      </div>
     </div>
   );
 }
@@ -53,13 +71,17 @@ export function EquityChart() {
     staleTime: 60_000,
   });
 
-  const minY = data.length > 0 ? Math.min(...data.map((d) => d.equityUsd)) * 0.995 : 0;
-  const maxY = data.length > 0 ? Math.max(...data.map((d) => d.equityUsd)) * 1.005 : 100;
+  const allValues = data.flatMap((d) => [d.equityUsd, d.availableUsd]);
+  const minY = allValues.length > 0 ? Math.min(...allValues) * 0.995 : 0;
+  const maxY = allValues.length > 0 ? Math.max(...allValues) * 1.005 : 100;
 
   return (
     <div className="bg-card border border-border rounded-[14px] p-5">
       <div className="flex items-center justify-between mb-5">
-        <h3 className="font-semibold text-sm text-text-1">Equity curve</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="font-semibold text-sm text-text-1">Equity curve</h3>
+          <InfoTooltip />
+        </div>
         <div className="flex items-center gap-1 bg-surface rounded-lg p-1">
           {TF_LABELS.map(({ key, label }) => (
             <button
@@ -91,6 +113,10 @@ export function EquityChart() {
                   <stop offset="0%" stopColor="#34d399" stopOpacity={0.15} />
                   <stop offset="100%" stopColor="#34d399" stopOpacity={0} />
                 </linearGradient>
+                <linearGradient id="availableGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#60a5fa" stopOpacity={0.08} />
+                  <stop offset="100%" stopColor="#60a5fa" stopOpacity={0} />
+                </linearGradient>
               </defs>
               <CartesianGrid vertical={false} stroke="#2a2a2e" strokeDasharray="3 3" />
               <XAxis
@@ -112,6 +138,16 @@ export function EquityChart() {
               <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#3a3a42", strokeWidth: 1 }} />
               <Area
                 type="monotone"
+                dataKey="availableUsd"
+                stroke="#60a5fa"
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                fill="url(#availableGrad)"
+                dot={false}
+                activeDot={{ r: 3, fill: "#60a5fa", stroke: "#17171a", strokeWidth: 2 }}
+              />
+              <Area
+                type="monotone"
                 dataKey="equityUsd"
                 stroke="#34d399"
                 strokeWidth={2}
@@ -122,6 +158,17 @@ export function EquityChart() {
             </AreaChart>
           </ResponsiveContainer>
         )}
+      </div>
+
+      <div className="flex items-center gap-4 mt-3 pl-1">
+        <div className="flex items-center gap-1.5">
+          <div className="w-4 h-0.5 bg-[#34d399]" />
+          <span className="text-[11px] text-text-3 font-mono">Equity</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-4 border-t border-dashed border-[#60a5fa]" />
+          <span className="text-[11px] text-text-3 font-mono">Available</span>
+        </div>
       </div>
     </div>
   );

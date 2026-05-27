@@ -23,6 +23,32 @@ export interface InstrumentInfo {
   maxQty: number;
 }
 
+export interface ExecutionFill {
+  orderId: string;
+  execId: string;
+  symbol: string;
+  side: string;
+  execPrice: number;
+  execQty: number;
+  execFee: number;
+  execTime: number;
+  closedSize: number;
+}
+
+export interface ClosedPnLEntry {
+  orderId: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  avgEntryPrice: number;
+  avgExitPrice: number;
+  closedPnl: number;
+  openFee: number;
+  closeFee: number;
+  createdTime: number;
+  updatedTime: number;
+}
+
 const RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
 
 function isNetworkError(err: unknown): boolean {
@@ -176,5 +202,82 @@ export class BybitClient {
       minQty: Number(lot.minOrderQty),
       maxQty: Number(lot.maxOrderQty),
     };
+  }
+
+  async getExecutionList(params: {
+    symbol?: string;
+    orderId?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  }): Promise<ExecutionFill[]> {
+    const results: ExecutionFill[] = [];
+    let cursor: string | undefined;
+    do {
+      const res = await withRetry(() =>
+        this.client.getExecutionList({
+          category: "linear",
+          ...params,
+          limit: params.limit ?? 100,
+          cursor,
+        })
+      );
+      if (res.retCode !== 0) bybitError(res);
+      for (const e of res.result.list) {
+        results.push({
+          orderId: e.orderId,
+          execId: e.execId,
+          symbol: e.symbol,
+          side: e.side,
+          execPrice: Number(e.execPrice),
+          execQty: Number(e.execQty),
+          execFee: Number(e.execFee),
+          execTime: Number(e.execTime),
+          closedSize: Number(e.closedSize ?? "0"),
+        });
+      }
+      cursor = res.result.nextPageCursor ?? undefined;
+      if (params.limit) break; // caller specified a limit — single page only
+    } while (cursor);
+    return results;
+  }
+
+  async getClosedPnL(params: {
+    symbol?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  }): Promise<ClosedPnLEntry[]> {
+    const results: ClosedPnLEntry[] = [];
+    let cursor: string | undefined;
+    do {
+      const res = await withRetry(() =>
+        this.client.getClosedPnL({
+          category: "linear",
+          ...params,
+          limit: params.limit ?? 100,
+          cursor,
+        })
+      );
+      if (res.retCode !== 0) bybitError(res);
+      for (const p of res.result.list) {
+        results.push({
+          orderId: p.orderId,
+          symbol: p.symbol,
+          side: p.side,
+          qty: Number(p.qty),
+          avgEntryPrice: Number(p.avgEntryPrice),
+          avgExitPrice: Number(p.avgExitPrice),
+          closedPnl: Number(p.closedPnl),
+          openFee: Number(p.openFee),
+          closeFee: Number(p.closeFee),
+          createdTime: Number(p.createdTime),
+          updatedTime: Number(p.updatedTime),
+        });
+      }
+      cursor = res.result.nextPageCursor ?? undefined;
+      if (params.limit) break;
+    } while (cursor);
+    return results;
   }
 }

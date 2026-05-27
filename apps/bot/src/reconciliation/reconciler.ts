@@ -13,9 +13,23 @@ interface WsPositionUpdate {
 interface WsOrderUpdate {
   orderId: string;
   symbol: string;
+  side: string;       // "Buy" | "Sell"
+  qty: string;
   orderStatus: string;
   avgPrice: string;
+  cumExecFee: string;
+  closedPnl: string;
   reduceOnly: boolean;
+  updatedTime: string;
+  createType?: string; // e.g. "CreateByUser" | "CreateByLiq" | "CreateByTakeOver_PassThrough" | "CreateByAdl_PassThrough"
+}
+
+interface WsExecutionUpdate {
+  execType: string;   // "Trade" | "Funding" | "AdlTrade" | "BustTrade" | "BlockTrade" | "MovePosition"
+  symbol: string;
+  execId: string;
+  execFee: string;    // for Funding type: negative = paid out, positive = received
+  execTime: string;
 }
 
 interface WsUpdateEvent {
@@ -23,8 +37,17 @@ interface WsUpdateEvent {
   data: unknown;
 }
 
-function pnlForClose(entryPrice: number, exitPrice: number, qty: number, side: string): number {
-  return (exitPrice - entryPrice) * qty * (side === "BUY" ? 1 : -1);
+/** "Buy" → "SELL", "Sell" → "BUY" — trade.side stored in signal-action case */
+function dbSideForClosingOrder(orderSide: string): string {
+  return orderSide === "Buy" ? "SELL" : "BUY";
+}
+
+function isLiquidationCreateType(createType: string | undefined): boolean {
+  return (
+    createType === "CreateByLiq" ||
+    createType === "CreateByTakeOver_PassThrough" ||
+    createType === "CreateByAdl_PassThrough"
+  );
 }
 
 export class Reconciler {
@@ -32,6 +55,7 @@ export class Reconciler {
   private balanceTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private lastWsActivityAt = Date.now();
+  private wsAuthFailed = false;
 
   constructor(
     private readonly db: PrismaClient,
@@ -85,8 +109,6 @@ export class Reconciler {
 
     ws.on("exception", (data: unknown) => {
       const msg = (data as { message?: string })?.message ?? "";
-      // 403/401 = auth failure — SDK will keep retrying internally, but we silence
-      // further log spam and tear down so the bot process stays alive
       if (msg.includes("403") || msg.includes("401")) {
         if (!this.wsAuthFailed) {
           this.wsAuthFailed = true;
@@ -103,17 +125,16 @@ export class Reconciler {
       console.error("[reconciler] WS exception:", data);
     });
 
-    ws.subscribeV5(["position", "order", "wallet"], "linear");
+    ws.subscribeV5(["position", "order", "execution", "wallet"], "linear");
     this.ws = ws;
-    console.log("[reconciler] subscribed to position/order/wallet");
+    console.log("[reconciler] subscribed to position/order/execution/wallet");
   }
 
-  private wsAuthFailed = false;
+  private lastWalletSnapshotAt = 0;
 
   private startBalanceSnapshots(): void {
     const snap = () =>
       this.takeBalanceSnapshot().catch((err: unknown) => {
-        // Strip requestOptions (contains API key/secret) before logging
         if (err !== null && typeof err === "object" && "requestOptions" in err) {
           const { requestOptions: _omit, ...safe } = err as Record<string, unknown>;
           console.error("[reconciler] balance snapshot error:", safe);
@@ -127,6 +148,7 @@ export class Reconciler {
 
   private async takeBalanceSnapshot(): Promise<void> {
     if (this.stopping) return;
+    this.lastWalletSnapshotAt = Date.now();
     const bal = await this.bybit.getBalance("USDT");
     await this.db.balanceSnapshot.create({
       data: { equityUsd: bal.equity, availableUsd: bal.available },
@@ -141,85 +163,258 @@ export class Reconciler {
     if (event.topic === "order") {
       const orders = event.data as WsOrderUpdate[];
       for (const order of orders) {
-        if (order.orderStatus === "Filled" && order.reduceOnly) {
+        if (order.orderStatus !== "Filled") continue;
+        if (order.reduceOnly) {
           await this.closeTradesByOrderFill(order);
+        } else {
+          await this.hydrateOpenTradeFill(order);
         }
       }
     } else if (event.topic === "position") {
       const positions = event.data as WsPositionUpdate[];
       for (const pos of positions) {
         if (Number(pos.size) === 0) {
-          await this.closeRemainingOpenTrades(pos.symbol, Number(pos.markPrice));
+          await this.closeRemainingOpenTrades(pos.symbol);
         }
+      }
+    } else if (event.topic === "execution") {
+      const executions = event.data as WsExecutionUpdate[];
+      for (const exec of executions) {
+        if (exec.execType !== "Funding") continue;
+        await this.handleFundingExecution(exec);
+      }
+    } else if (event.topic === "wallet") {
+      // Take an extra snapshot on wallet updates, rate-limited to once per 5s
+      if (Date.now() - this.lastWalletSnapshotAt > 5_000) {
+        this.takeBalanceSnapshot().catch((err: unknown) =>
+          console.error("[reconciler] wallet-triggered snapshot error:", err)
+        );
       }
     }
   }
 
-  private async closeTradesByOrderFill(order: WsOrderUpdate): Promise<void> {
-    const exitPrice = Number(order.avgPrice);
-    if (!exitPrice) return;
-
-    const openTrades = await this.db.trade.findMany({
-      where: { symbol: order.symbol, status: "OPEN" },
+  private async applyCloseExecution(params: {
+    tradeId: number;
+    botId: number;
+    symbol: string;
+    exitFillPrice: number;
+    feeCloseUsd: number;
+    closingOrderId: string;
+    realizedPnlUsd: number;
+    pnlSource: string;
+  }): Promise<void> {
+    const { tradeId, botId, symbol, exitFillPrice, feeCloseUsd, closingOrderId, realizedPnlUsd, pnlSource } = params;
+    await this.db.trade.update({
+      where: { id: tradeId },
+      data: {
+        status: "CLOSED",
+        exitPrice: exitFillPrice,
+        exitFillPrice,
+        pnlUsd: realizedPnlUsd,
+        realizedPnlUsd,
+        feeCloseUsd,
+        closingOrderId,
+        pnlSource,
+        closedAt: new Date(),
+      },
     });
-    if (openTrades.length === 0) return;
-
-    const now = new Date();
-    await this.db.$transaction(
-      openTrades.map((t) =>
-        this.db.trade.update({
-          where: { id: t.id },
-          data: {
-            status: "CLOSED",
-            exitPrice,
-            pnlUsd: pnlForClose(t.entryPrice, exitPrice, t.qty, t.side),
-            closedAt: now,
-          },
-        })
-      )
-    );
-    for (const t of openTrades) {
-      this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol: order.symbol, pnlUsd: pnlForClose(t.entryPrice, exitPrice, t.qty, t.side) } });
-    }
-    console.log(`[reconciler] order fill: closed ${openTrades.length} trade(s) for ${order.symbol} @ ${exitPrice}`);
+    this.bus?.publish({ type: "trade.closed", data: { tradeId, botId, symbol, pnlUsd: realizedPnlUsd } });
   }
 
-  private async closeRemainingOpenTrades(symbol: string, exitPrice: number): Promise<void> {
-    // Position size hit 0 — close any trades the order-fill handler missed
+  private async closeTradesByOrderFill(order: WsOrderUpdate): Promise<void> {
+    const exitFillPrice = Number(order.avgPrice);
+    if (!exitFillPrice) return;
+
+    const feeCloseUsd = Number(order.cumExecFee);
+    const realizedPnlUsd = Number(order.closedPnl);
+
+    // 1. Idempotency: already processed this order?
+    const already = await this.db.trade.findFirst({
+      where: { closingOrderId: order.orderId },
+    });
+    if (already) return;
+
+    const expectedDbSide = dbSideForClosingOrder(order.side);
+
+    const candidates = await this.db.trade.findMany({
+      where: { symbol: order.symbol, status: { in: ["OPEN", "CLOSING"] } },
+    });
+
+    // 2. Liquidation branch: skip qty match — close all trades on the affected side
+    if (isLiquidationCreateType(order.createType)) {
+      const liquidationTrades = candidates.filter((t) => t.side === expectedDbSide);
+      if (liquidationTrades.length === 0) {
+        console.warn(`[reconciler] liquidation ${order.orderId}: no matching trades for ${order.symbol} side=${expectedDbSide}`);
+        return;
+      }
+      let firstTrade = true;
+      for (const trade of liquidationTrades) {
+        // First trade absorbs the full liquidation PnL + fees; subsequent rows are tagged only
+        await this.applyCloseExecution({
+          tradeId: trade.id,
+          botId: trade.botId,
+          symbol: order.symbol,
+          exitFillPrice,
+          feeCloseUsd: firstTrade ? feeCloseUsd : 0,
+          closingOrderId: order.orderId,
+          realizedPnlUsd: firstTrade ? realizedPnlUsd : 0,
+          pnlSource: "BYBIT_LIQUIDATION",
+        });
+        if (firstTrade) {
+          this.bus?.publish({ type: "trade.liquidated", data: { tradeId: trade.id, botId: trade.botId, symbol: order.symbol, realizedPnlUsd, createType: order.createType ?? "" } });
+          firstTrade = false;
+        }
+      }
+      console.log(`[reconciler] liquidation: closed ${liquidationTrades.length} trade(s) for ${order.symbol} pnl=${realizedPnlUsd.toFixed(4)} createType=${order.createType ?? "?"}`);
+      return;
+    }
+
+    // 3. Normal close: require side + qty match within 0.5%
+    const orderQty = Number(order.qty);
+    const matched = candidates.filter(
+      (t) =>
+        t.side === expectedDbSide &&
+        (orderQty === 0 || Math.abs(t.qty - orderQty) / Math.max(t.qty, orderQty) < 0.005)
+    );
+
+    if (matched.length === 0) {
+      console.warn(`[reconciler] order fill ${order.orderId}: no matching trade for ${order.symbol} (side=${expectedDbSide}, qty=${orderQty})`);
+      return;
+    }
+    if (matched.length > 1) {
+      console.warn(`[reconciler] order fill ${order.orderId}: ${matched.length} ambiguous matches for ${order.symbol} — skipping, will resolve on reconciliation`);
+      return;
+    }
+
+    const trade = matched[0]!;
+    await this.applyCloseExecution({
+      tradeId: trade.id,
+      botId: trade.botId,
+      symbol: order.symbol,
+      exitFillPrice,
+      feeCloseUsd,
+      closingOrderId: order.orderId,
+      realizedPnlUsd,
+      pnlSource: "BYBIT_WS",
+    });
+    console.log(`[reconciler] order fill: closed trade #${trade.id} for ${order.symbol} @ ${exitFillPrice} pnl=${realizedPnlUsd.toFixed(4)}`);
+  }
+
+  private async handleFundingExecution(exec: WsExecutionUpdate): Promise<void> {
+    // Bybit reports funding via the execution topic with execType="Funding".
+    // execFee holds the funding amount: negative = paid out, positive = received.
+    const fundingUsd = Number(exec.execFee);
+    if (isNaN(fundingUsd)) return;
+
+    try {
+      await this.db.fundingEvent.upsert({
+        where: { execId: exec.execId },
+        create: {
+          symbol: exec.symbol,
+          fundingUsd,
+          execTime: new Date(Number(exec.execTime)),
+          execId: exec.execId,
+        },
+        update: {}, // idempotent — no update needed
+      });
+      console.log(`[reconciler] funding: ${exec.symbol} ${fundingUsd >= 0 ? "+" : ""}${fundingUsd.toFixed(4)} execId=${exec.execId}`);
+    } catch (err) {
+      console.error("[reconciler] failed to persist funding event:", err);
+    }
+  }
+
+  private async closeRemainingOpenTrades(symbol: string): Promise<void> {
+    // Position size hit 0 via WS position update — close any OPEN/CLOSING trades
+    // the order-fill handler missed (e.g. auth failure window, reconnect).
     const openTrades = await this.db.trade.findMany({
-      where: { symbol, status: "OPEN" },
+      where: { symbol, status: { in: ["OPEN", "CLOSING"] } },
     });
     if (openTrades.length === 0) return;
 
+    // Fetch recent executions to get the real fill price
+    let exitFillPrice: number | null = null;
+    let feeCloseUsd = 0;
+    try {
+      const execs = await this.bybit.getExecutionList({
+        symbol,
+        startTime: Date.now() - 60_000,
+        limit: 20,
+      });
+      // Pick the most recent reduce-only execution (closedSize > 0)
+      const closeExec = execs
+        .filter((e) => e.closedSize > 0)
+        .sort((a, b) => b.execTime - a.execTime)[0];
+      if (closeExec) {
+        exitFillPrice = closeExec.execPrice;
+        feeCloseUsd = closeExec.execFee;
+      }
+    } catch (err) {
+      console.warn("[reconciler] closeRemainingOpenTrades: getExecutionList failed, falling back to markPrice from DB", err);
+    }
+
     const now = new Date();
-    await this.db.$transaction(
-      openTrades.map((t) =>
-        this.db.trade.update({
-          where: { id: t.id },
+    for (const trade of openTrades) {
+      if (exitFillPrice !== null) {
+        // Compute PnL from fill price — we don't have closedPnl here, so use EXEC_FALLBACK
+        const realizedPnlUsd =
+          (exitFillPrice - trade.entryPrice) * trade.qty * (trade.side === "BUY" ? 1 : -1) - feeCloseUsd;
+        await this.db.trade.update({
+          where: { id: trade.id },
           data: {
             status: "CLOSED",
-            exitPrice,
-            pnlUsd: pnlForClose(t.entryPrice, exitPrice, t.qty, t.side),
+            exitPrice: exitFillPrice,
+            exitFillPrice,
+            pnlUsd: realizedPnlUsd,
+            realizedPnlUsd,
+            feeCloseUsd,
+            pnlSource: "EXEC_FALLBACK",
             closedAt: now,
           },
-        })
-      )
-    );
-    for (const t of openTrades) {
-      this.bus?.publish({ type: "trade.closed", data: { tradeId: t.id, botId: t.botId, symbol, pnlUsd: pnlForClose(t.entryPrice, exitPrice, t.qty, t.side) } });
+        });
+        this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: realizedPnlUsd } });
+      } else {
+        // Last resort: close without fill price data (no execution found)
+        await this.db.trade.update({
+          where: { id: trade.id },
+          data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
+        });
+        this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: null } });
+        console.warn(`[reconciler] position closed: trade #${trade.id} for ${symbol} has no execution data`);
+      }
     }
-    console.log(`[reconciler] position closed: ${openTrades.length} remaining trade(s) for ${symbol} @ ${exitPrice}`);
+    console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);
+  }
+
+  private async hydrateOpenTradeFill(order: WsOrderUpdate): Promise<void> {
+    // Non-reduce-only fill → hydrate entryFillPrice + feeOpenUsd on the matching open trade
+    const entryFillPrice = Number(order.avgPrice);
+    if (!entryFillPrice) return;
+
+    const trade = await this.db.trade.findFirst({
+      where: { exchangeOrderId: order.orderId, status: { in: ["OPEN", "CLOSING"] } },
+    });
+    if (!trade) return;
+
+    await this.db.trade.update({
+      where: { id: trade.id },
+      data: {
+        entryFillPrice,
+        feeOpenUsd: Number(order.cumExecFee),
+        entryPrice: entryFillPrice, // keep entryPrice in sync with actual fill
+      },
+    });
+    console.log(`[reconciler] open fill: hydrated trade #${trade.id} entryFillPrice=${entryFillPrice}`);
   }
 
   async runReconciliation(reason: string): Promise<void> {
     console.log(`[reconciler] ${reason} reconciliation running...`);
 
     const openTrades = await this.db.trade.findMany({
-      where: { status: "OPEN" },
+      where: { status: { in: ["OPEN", "CLOSING"] } },
     });
 
     if (openTrades.length === 0) {
-      console.log(`[reconciler] ${reason}: 0 open trades — 0 mismatches`);
+      console.log(`[reconciler] ${reason}: 0 open/closing trades — 0 mismatches`);
       return;
     }
 
@@ -231,19 +426,29 @@ export class Reconciler {
         const positions = await this.bybit.getPositions(symbol);
         const openPos = positions.find((p) => p.size > 0);
         const dbTrades = openTrades.filter((t) => t.symbol === symbol);
+        const closingTrades = dbTrades.filter((t) => t.status === "CLOSING");
 
         if (!openPos && dbTrades.length > 0) {
-          console.warn(
-            `[reconciler] MISMATCH: DB has ${dbTrades.length} OPEN trade(s) for ${symbol} but exchange has no position`
-          );
+          // Exchange has no position but DB has OPEN/CLOSING trades — close them
+          if (closingTrades.length > 0) {
+            // These were in CLOSING — reconciler will let the WS order event finalize,
+            // but if it's been more than 30s we should close them now
+            console.warn(
+              `[reconciler] MISMATCH: ${closingTrades.length} CLOSING trade(s) for ${symbol} but exchange has no position`
+            );
+          } else {
+            console.warn(
+              `[reconciler] MISMATCH: DB has ${dbTrades.length} OPEN trade(s) for ${symbol} but exchange has no position`
+            );
+          }
           mismatches += dbTrades.length;
         } else if (openPos && dbTrades.length === 0) {
           console.warn(
-            `[reconciler] MISMATCH: Exchange has open position for ${symbol} (size=${openPos.size}) but DB has no OPEN trades`
+            `[reconciler] MISMATCH: Exchange has open position for ${symbol} (size=${openPos.size}) but DB has no OPEN/CLOSING trades`
           );
           mismatches++;
         } else {
-          console.log(`[reconciler] OK: ${symbol} — ${dbTrades.length} trade(s), exchange size=${openPos?.size ?? 0}`);
+          console.log(`[reconciler] OK: ${symbol} — ${dbTrades.length} trade(s) (${closingTrades.length} closing), exchange size=${openPos?.size ?? 0}`);
         }
       } catch (err) {
         console.error(`[reconciler] failed to check ${symbol}:`, err);

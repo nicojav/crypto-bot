@@ -14,7 +14,7 @@ const processor = new SignalProcessor(prisma, bybit, bus);
 const reconciler = new Reconciler(prisma, bybit, bus);
 const notifier = new Notifier(bus, prisma);
 
-const app = buildApp(prisma, { level: env.LOG_LEVEL }, processor);
+const app = buildApp(prisma, { level: env.LOG_LEVEL }, processor, bybit);
 
 app.addHook("onReady", async () => {
   reconciler.start().catch((err: unknown) => app.log.error({ err }, "reconciler failed to start"));

@@ -25,6 +25,8 @@ export function useWebSocket() {
           case "trade.closed":
             void qc.invalidateQueries({ queryKey: ["trades"] });
             void qc.invalidateQueries({ queryKey: ["bots"] });
+            void qc.invalidateQueries({ queryKey: ["positions"] });
+            void qc.invalidateQueries({ queryKey: ["equitySummary"] });
             break;
           case "balance.updated":
             void qc.invalidateQueries({ queryKey: ["equity"] });

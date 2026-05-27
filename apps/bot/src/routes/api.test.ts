@@ -72,6 +72,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await testDb.fundingEvent.deleteMany();
   await testDb.trade.deleteMany();
   await testDb.signal.deleteMany();
   await testDb.balanceSnapshot.deleteMany();
@@ -329,6 +330,246 @@ describe("POST /api/bots", () => {
       payload: { name: "Unauth Bot", symbol: "BTCUSDT" },
     });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// ── GET /api/positions ────────────────────────────────────────────────────────
+
+describe("GET /api/positions", () => {
+  it("returns empty array when no open trades", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/positions", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<unknown[]>()).toHaveLength(0);
+  });
+
+  it("returns OPEN and CLOSING trades with correct shape", async () => {
+    const sig = await testDb.signal.create({
+      data: { botId, webhookId: "wh-pos-1", action: "BUY", payload: "{}", status: "EXECUTED" },
+    });
+    await testDb.trade.create({
+      data: {
+        botId,
+        signalId: sig.id,
+        exchangeOrderId: "ord-pos-1",
+        symbol: "XRPUSDT",
+        side: "BUY",
+        qty: 100,
+        entryPrice: 3.00,
+        status: "OPEN",
+      },
+    });
+    const sig2 = await testDb.signal.create({
+      data: { botId, webhookId: "wh-pos-2", action: "SELL", payload: "{}", status: "EXECUTED" },
+    });
+    await testDb.trade.create({
+      data: {
+        botId,
+        signalId: sig2.id,
+        exchangeOrderId: "ord-pos-2",
+        symbol: "XRPUSDT",
+        side: "SELL",
+        qty: 50,
+        entryPrice: 3.10,
+        status: "CLOSING",
+        closingOrderId: "close-ord-pos-2",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/positions", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<Array<{
+      tradeId: number; botId: number; symbol: string; side: string;
+      qty: number; entryPrice: number; status: string; openedAt: string;
+      markPrice: null; unrealisedPnl: null;
+    }>>();
+    expect(body).toHaveLength(2);
+
+    const openPos = body.find((p) => p.status === "OPEN");
+    expect(openPos).toBeDefined();
+    expect(openPos?.symbol).toBe("XRPUSDT");
+    expect(openPos?.side).toBe("BUY");
+    expect(openPos?.qty).toBe(100);
+    expect(openPos?.entryPrice).toBe(3);
+    expect(openPos?.botId).toBe(botId);
+    // No Bybit client passed to buildApp → live data is null
+    expect(openPos?.markPrice).toBeNull();
+    expect(openPos?.unrealisedPnl).toBeNull();
+
+    const closingPos = body.find((p) => p.status === "CLOSING");
+    expect(closingPos).toBeDefined();
+    expect(closingPos?.side).toBe("SELL");
+  });
+
+  it("does not include CLOSED trades", async () => {
+    const sig = await testDb.signal.create({
+      data: { botId, webhookId: "wh-pos-closed", action: "BUY", payload: "{}", status: "EXECUTED" },
+    });
+    await testDb.trade.create({
+      data: {
+        botId,
+        signalId: sig.id,
+        exchangeOrderId: "ord-pos-closed",
+        symbol: "XRPUSDT",
+        side: "BUY",
+        qty: 100,
+        entryPrice: 3.00,
+        status: "CLOSED",
+        pnlUsd: 50,
+        closedAt: new Date(),
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/positions", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<unknown[]>()).toHaveLength(0);
+  });
+
+  it("missing token → 401", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/positions" });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ── GET /api/equity/summary ───────────────────────────────────────────────────
+
+describe("GET /api/equity/summary", () => {
+  it("returns zero deltas when no data in window", async () => {
+    const from = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    const to = new Date("2020-01-01T23:59:59.000Z").toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ deltaEquityUsd: number; sumRealizedPnlUsd: number; sumFeeUsd: number; residualUsd: number; tradeCount: number }>();
+    expect(body.deltaEquityUsd).toBe(0);
+    expect(body.sumRealizedPnlUsd).toBe(0);
+    expect(body.sumFeeUsd).toBe(0);
+    expect(body.residualUsd).toBe(0);
+    expect(body.tradeCount).toBe(0);
+  });
+
+  it("computes correct deltaEquityUsd from first and last snapshot in window", async () => {
+    await testDb.balanceSnapshot.create({ data: { equityUsd: 1000, availableUsd: 900 } });
+    await testDb.balanceSnapshot.create({ data: { equityUsd: 1200, availableUsd: 1100 } });
+
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ deltaEquityUsd: number }>();
+    expect(body.deltaEquityUsd).toBeCloseTo(200);
+  });
+
+  it("sums realizedPnlUsd from CLOSED trades in window", async () => {
+    const closedAt = new Date();
+    const sig1 = await testDb.signal.create({ data: { botId, webhookId: "wh-sum-1", action: "BUY", payload: "{}", status: "EXECUTED" } });
+    const sig2 = await testDb.signal.create({ data: { botId, webhookId: "wh-sum-2", action: "BUY", payload: "{}", status: "EXECUTED" } });
+    await testDb.trade.create({
+      data: { botId, signalId: sig1.id, exchangeOrderId: "ord-sum-1", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 50, feeOpenUsd: 0.10, feeCloseUsd: 0.15, closedAt },
+    });
+    await testDb.trade.create({
+      data: { botId, signalId: sig2.id, exchangeOrderId: "ord-sum-2", symbol: "XRPUSDT", side: "SELL", qty: 50, entryPrice: 3.10, status: "CLOSED", realizedPnlUsd: 30, feeOpenUsd: 0.08, feeCloseUsd: 0.12, closedAt },
+    });
+
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ sumRealizedPnlUsd: number; sumFeeUsd: number; tradeCount: number }>();
+    expect(body.sumRealizedPnlUsd).toBeCloseTo(80); // 50 + 30
+    expect(body.sumFeeUsd).toBeCloseTo(0.45);        // (0.10+0.15) + (0.08+0.12)
+    expect(body.tradeCount).toBe(2);
+  });
+
+  it("falls back to pnlUsd when realizedPnlUsd is null", async () => {
+    const closedAt = new Date();
+    const sig = await testDb.signal.create({ data: { botId, webhookId: "wh-fallback-pnl", action: "BUY", payload: "{}", status: "EXECUTED" } });
+    await testDb.trade.create({
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-fallback", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", pnlUsd: 42, realizedPnlUsd: null, closedAt },
+    });
+
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ sumRealizedPnlUsd: number }>();
+    expect(body.sumRealizedPnlUsd).toBeCloseTo(42);
+  });
+
+  it("residualUsd = deltaEquity − (realized − fees)", async () => {
+    // Two snapshots: delta = 200
+    await testDb.balanceSnapshot.create({ data: { equityUsd: 1000, availableUsd: 900 } });
+    await testDb.balanceSnapshot.create({ data: { equityUsd: 1200, availableUsd: 1100 } });
+
+    const closedAt = new Date();
+    const sig = await testDb.signal.create({ data: { botId, webhookId: "wh-residual", action: "BUY", payload: "{}", status: "EXECUTED" } });
+    // Realized = 180, fees = 10 → net = 170; residual = 200 - 170 = 30
+    await testDb.trade.create({
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-residual", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 180, feeOpenUsd: 5, feeCloseUsd: 5, closedAt },
+    });
+
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ deltaEquityUsd: number; sumRealizedPnlUsd: number; sumFeeUsd: number; residualUsd: number }>();
+    expect(body.deltaEquityUsd).toBeCloseTo(200);
+    expect(body.sumRealizedPnlUsd).toBeCloseTo(180);
+    expect(body.sumFeeUsd).toBeCloseTo(10);
+    expect(body.residualUsd).toBeCloseTo(30); // 200 - (180 - 10) = 30
+  });
+
+  it("missing token → 401", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/equity/summary" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("response includes required schema fields including sumFundingUsd", async () => {
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<Record<string, unknown>>();
+    for (const field of ["from", "to", "deltaEquityUsd", "sumRealizedPnlUsd", "sumFeeUsd", "sumFundingUsd", "residualUsd", "tradeCount"]) {
+      expect(body).toHaveProperty(field);
+    }
+  });
+
+  it("sums FundingEvents in window into sumFundingUsd", async () => {
+    const execTime = new Date();
+    await testDb.fundingEvent.create({ data: { symbol: "XRPUSDT", fundingUsd: -2.50, execTime, execId: "f-sum-1" } });
+    await testDb.fundingEvent.create({ data: { symbol: "SOLUSDT", fundingUsd: 0.80, execTime, execId: "f-sum-2" } });
+
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ sumFundingUsd: number }>();
+    expect(body.sumFundingUsd).toBeCloseTo(-1.70); // -2.50 + 0.80
+  });
+
+  it("funding is factored into residualUsd", async () => {
+    // Snapshots: delta = 200
+    await testDb.balanceSnapshot.create({ data: { equityUsd: 1000, availableUsd: 900 } });
+    await testDb.balanceSnapshot.create({ data: { equityUsd: 1200, availableUsd: 1100 } });
+
+    // Trade: realized = 180, fees = 10
+    const closedAt = new Date();
+    const sig = await testDb.signal.create({ data: { botId, webhookId: "wh-funding-residual", action: "BUY", payload: "{}", status: "EXECUTED" } });
+    await testDb.trade.create({
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-fr", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 180, feeOpenUsd: 5, feeCloseUsd: 5, closedAt },
+    });
+
+    // Funding: -15 paid out
+    const execTime = new Date();
+    await testDb.fundingEvent.create({ data: { symbol: "XRPUSDT", fundingUsd: -15, execTime, execId: "f-res-1" } });
+
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({ method: "GET", url: `/api/equity/summary?from=${from}&to=${to}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ residualUsd: number; sumFundingUsd: number }>();
+    // residual = Δequity − (realized − fees + funding)
+    //          = 200 − (180 − 10 + (−15)) = 200 − 155 = 45
+    expect(body.sumFundingUsd).toBeCloseTo(-15);
+    expect(body.residualUsd).toBeCloseTo(45);
   });
 });
 

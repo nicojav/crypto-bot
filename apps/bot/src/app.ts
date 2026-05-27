@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "./generated/prisma/client.js";
+import type { BybitClient } from "./exchange/bybit.js";
 import type { SignalProcessor } from "./processor/signalProcessor.js";
 import { webhookPlugin } from "./routes/webhook.js";
 import { apiPlugin } from "./routes/api.js";
@@ -10,6 +11,7 @@ export function buildApp(
   db: PrismaClient,
   logger: boolean | Record<string, unknown> = false,
   processor?: SignalProcessor,
+  bybit?: BybitClient,
 ) {
   const app = Fastify({
     logger,
@@ -44,7 +46,7 @@ export function buildApp(
 
   app.get("/health", async () => ({ status: "ok" }));
   app.register(webhookPlugin, { db });
-  app.register(apiPlugin, { db });
+  app.register(apiPlugin, { db, bybit });
 
   return app;
 }
