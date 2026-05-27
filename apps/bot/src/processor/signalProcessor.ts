@@ -136,6 +136,24 @@ export class SignalProcessor {
     return openTrades;
   }
 
+  // Sets OPEN trades to CLOSING so the reconciler's WS order-fill handler finalizes
+  // them with the real fill price and fees from Bybit.
+  private async markTradesAsClosing(botId: number, symbol: string, closingOrderId: string, prefetched?: Trade[]): Promise<Trade[]> {
+    const trades = prefetched ?? await this.db.trade.findMany({
+      where: { botId, symbol, status: "OPEN" },
+    });
+    if (trades.length === 0) return [];
+    await this.db.$transaction(
+      trades.map((t) =>
+        this.db.trade.update({
+          where: { id: t.id },
+          data: { status: "CLOSING", closingOrderId },
+        })
+      )
+    );
+    return trades;
+  }
+
   private async processDryRun(
     signal: SignalWithBot,
     bot: Bot,
@@ -192,13 +210,14 @@ export class SignalProcessor {
       }
       const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
       const orderId = await this.exchange.placeMarketOrder({ symbol, side: closeSide, qty: pos.size, reduceOnly: true });
-      const markPrice = await this.exchange.getMarkPrice(symbol);
-      await this.closeOpenTradesInDb(bot.id, symbol, markPrice);
+      // Mark trades as CLOSING — the reconciler's WS order-fill handler will finalize
+      // them with the real fill price and Bybit-computed PnL when the fill arrives.
+      await this.markTradesAsClosing(bot.id, symbol, orderId);
       await this.db.signal.update({
         where: { id: signal.id },
         data: { status: "EXECUTED", processedAt: new Date() },
       });
-      console.log(`[processor] CLOSE ${symbol} orderId=${orderId} markPrice=${markPrice}`);
+      console.log(`[processor] CLOSE ${symbol} orderId=${orderId}`);
       return;
     }
 
@@ -223,23 +242,27 @@ export class SignalProcessor {
     if (existing.some((t) => t.side !== signal.action)) {
       const positions = await this.exchange.getPositions(symbol);
       const oppositePos = positions.find((p) => p.size > 0);
-      const closePrice = await this.exchange.getMarkPrice(symbol);
 
       if (oppositePos && oppositePos.side !== side) {
         const closeSide = oppositePos.side === "Buy" ? "Sell" : "Buy";
+        let closeOrderId: string;
         try {
-          await this.exchange.placeMarketOrder({ symbol, side: closeSide, qty: oppositePos.size, reduceOnly: true });
+          closeOrderId = await this.exchange.placeMarketOrder({ symbol, side: closeSide, qty: oppositePos.size, reduceOnly: true });
         } catch (err) {
           await this.reject(signal.id, `Reduce-only close failed: ${(err as Error).message}`, bot.id);
           return;
         }
+        // Mark as CLOSING — reconciler finalizes with real fill price and Bybit PnL
+        await this.markTradesAsClosing(bot.id, symbol, closeOrderId, existing);
       } else if (oppositePos) {
         console.warn(`[processor] divergence: DB has OPEN ${existing[0]?.side ?? "?"} trade(s) for ${symbol} but exchange has same-side ${oppositePos.side} position — closing DB rows only`);
+        const markPrice = await this.exchange.getMarkPrice(symbol);
+        await this.closeOpenTradesInDb(bot.id, symbol, markPrice, existing);
       } else {
         console.warn(`[processor] reversal: DB has OPEN trade for ${symbol} but exchange has no position — closing DB only`);
+        const markPrice = await this.exchange.getMarkPrice(symbol);
+        await this.closeOpenTradesInDb(bot.id, symbol, markPrice, existing);
       }
-
-      await this.closeOpenTradesInDb(bot.id, symbol, closePrice, existing);
     }
 
     const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
