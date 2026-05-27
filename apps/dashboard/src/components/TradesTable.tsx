@@ -60,13 +60,30 @@ export function TradesTable() {
                     <div className="font-mono text-xs text-text-1">{fmtUsd.format(t.entryPrice)}</div>
                     <div className="font-mono text-xs text-text-3">{fmtQty.format(t.qty)}</div>
                   </td>
-                  <td className={`px-5 py-3 text-right font-mono text-sm font-medium tabular-nums ${
-                    t.pnlUsd === null ? "text-text-3" :
-                    t.pnlUsd >= 0 ? "text-green" : "text-red"
-                  }`}>
-                    {t.pnlUsd === null
-                      ? "—"
-                      : `${t.pnlUsd >= 0 ? "+" : ""}${fmtUsd.format(t.pnlUsd)}`}
+                  <td className="px-5 py-3 text-right">
+                    <div className={`font-mono text-sm font-medium tabular-nums ${
+                      t.pnlUsd === null ? "text-text-3" :
+                      t.pnlUsd >= 0 ? "text-green" : "text-red"
+                    }`}>
+                      {t.pnlUsd === null
+                        ? "—"
+                        : `${t.pnlUsd >= 0 ? "+" : ""}${fmtUsd.format(t.pnlUsd)}`}
+                    </div>
+                    {(t.feeOpenUsd !== null || t.feeCloseUsd !== null) && (
+                      <div className="font-mono text-[10px] text-text-3 mt-0.5" title="Total fees paid">
+                        fee {fmtUsd.format((t.feeOpenUsd ?? 0) + (t.feeCloseUsd ?? 0))}
+                      </div>
+                    )}
+                    {t.pnlSource === "EXEC_FALLBACK" && (
+                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Locally estimated — WS order event missed.">
+                        est.
+                      </span>
+                    )}
+                    {t.pnlSource === "BYBIT_LIQUIDATION" && (
+                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-red/10 text-red border border-red/20" title="Position was force-closed by the exchange.">
+                        liquidated
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -23,11 +23,43 @@ export type Trade = {
   side: string;
   qty: number;
   entryPrice: number;
+  entryFillPrice: number | null;
   exitPrice: number | null;
+  exitFillPrice: number | null;
   pnlUsd: number | null;
+  realizedPnlUsd: number | null;
+  feeOpenUsd: number | null;
+  feeCloseUsd: number | null;
+  pnlSource: string | null;
   status: string;
   openedAt: string;
   closedAt: string | null;
+};
+
+export type Position = {
+  tradeId: number;
+  botId: number;
+  symbol: string;
+  side: string;
+  qty: number;
+  entryPrice: number;
+  entryFillPrice: number | null;
+  markPrice: number | null;
+  unrealisedPnl: number | null;
+  feeOpenUsd: number | null;
+  status: string;
+  openedAt: string;
+};
+
+export type EquitySummary = {
+  from: string;
+  to: string;
+  deltaEquityUsd: number;
+  sumRealizedPnlUsd: number;
+  sumFeeUsd: number;
+  sumFundingUsd: number;
+  residualUsd: number;
+  tradeCount: number;
 };
 
 export type EquityPoint = {
@@ -52,7 +84,9 @@ export type BotEvent =
   | { type: "signal.received"; data: { signalId: number; botId: number; action: string; symbol: string } }
   | { type: "trade.opened"; data: { tradeId: number; botId: number; symbol: string; side: string; qty: number; entryPrice: number } }
   | { type: "trade.closed"; data: { tradeId: number; botId: number; symbol: string; pnlUsd: number | null } }
-  | { type: "balance.updated"; data: { equityUsd: number; availableUsd: number } };
+  | { type: "trade.liquidated"; data: { tradeId: number; botId: number; symbol: string; realizedPnlUsd: number; createType: string } }
+  | { type: "balance.updated"; data: { equityUsd: number; availableUsd: number } }
+  | { type: "ws.reconnected"; data: { disconnectedMs: number } };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -101,6 +135,15 @@ export const fetchEquity = (params?: { from?: string; to?: string }) => {
   if (params?.from) q.set("from", params.from);
   if (params?.to) q.set("to", params.to);
   return req<EquityPoint[]>(`/api/equity?${q}`);
+};
+
+export const fetchPositions = () => req<Position[]>("/api/positions");
+
+export const fetchEquitySummary = (params?: { from?: string; to?: string }) => {
+  const q = new URLSearchParams();
+  if (params?.from) q.set("from", params.from);
+  if (params?.to) q.set("to", params.to);
+  return req<EquitySummary>(`/api/equity/summary?${q}`);
 };
 
 export const fetchSignals = (params?: { botId?: number; limit?: number }) => {

@@ -9,6 +9,8 @@ import { KillSwitchDialog } from "./components/KillSwitchDialog";
 import { EditBotDialog } from "./components/EditBotDialog";
 import { CreateBotDialog } from "./components/CreateBotDialog";
 import { EquityChart } from "./components/EquityChart";
+import { EquityBreakdown } from "./components/EquityBreakdown";
+import { OpenPositions } from "./components/OpenPositions";
 import { SignalsTable } from "./components/SignalsTable";
 import { TradesTable } from "./components/TradesTable";
 
@@ -129,7 +131,11 @@ export default function App() {
         </section>
 
         {/* Equity chart */}
+        <EquityBreakdown />
         <EquityChart />
+
+        {/* Open positions (hidden when empty) */}
+        <OpenPositions />
 
         {/* Signals + Trades */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
