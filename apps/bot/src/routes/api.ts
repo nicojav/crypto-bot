@@ -488,7 +488,7 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
           try {
             const positions = await bybit.getPositions(sym);
             const pos = positions.find((p) => p.size > 0);
-            const entry = { unrealisedPnl: pos?.unrealisedPnl ?? 0, markPrice: pos?.entryPrice ?? 0 };
+            const entry = { unrealisedPnl: pos?.unrealisedPnl ?? 0, markPrice: pos?.markPrice ?? 0 };
             liveBySymbol.set(sym, entry);
             positionCache.set(sym, { ...entry, expiresAt: Date.now() + 5_000 });
           } catch {

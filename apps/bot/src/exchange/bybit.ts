@@ -12,6 +12,7 @@ export interface Position {
   side: "Buy" | "Sell" | "None";
   size: number;
   entryPrice: number;
+  markPrice: number;
   unrealisedPnl: number;
 }
 
@@ -138,6 +139,7 @@ export class BybitClient {
       side: p.side as "Buy" | "Sell" | "None",
       size: Number(p.size),
       entryPrice: Number(p.avgPrice),
+      markPrice: Number(p.markPrice),
       unrealisedPnl: Number(p.unrealisedPnl),
     }));
   }
