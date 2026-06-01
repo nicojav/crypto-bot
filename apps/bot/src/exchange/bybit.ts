@@ -144,6 +144,13 @@ export class BybitClient {
     }));
   }
 
+  async cancelOrder(symbol: string, orderId: string): Promise<void> {
+    const res = await withRetry(() =>
+      this.client.cancelOrder({ category: "linear", symbol, orderId })
+    );
+    if (res.retCode !== 0) bybitError(res);
+  }
+
   async getMarkPrice(symbol: string): Promise<number> {
     const res = await withRetry(() =>
       this.client.getTickers({ category: "linear", symbol })

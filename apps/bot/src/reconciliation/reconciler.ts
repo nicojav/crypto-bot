@@ -53,6 +53,7 @@ function isLiquidationCreateType(createType: string | undefined): boolean {
 export class Reconciler {
   private ws: WebsocketClient | null = null;
   private balanceTimer: ReturnType<typeof setInterval> | null = null;
+  private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private lastWsActivityAt = Date.now();
   private wsAuthFailed = false;
@@ -69,6 +70,7 @@ export class Reconciler {
     });
     this.initWebSocket();
     this.startBalanceSnapshots();
+    this.startPeriodicReconciliation();
   }
 
   stop(): void {
@@ -77,10 +79,23 @@ export class Reconciler {
       clearInterval(this.balanceTimer);
       this.balanceTimer = null;
     }
+    if (this.reconciliationTimer !== null) {
+      clearInterval(this.reconciliationTimer);
+      this.reconciliationTimer = null;
+    }
     if (this.ws) {
       this.ws.closeAll();
       this.ws = null;
     }
+  }
+
+  private startPeriodicReconciliation(): void {
+    this.reconciliationTimer = setInterval(() => {
+      if (this.stopping) return;
+      this.runReconciliation("periodic").catch((err: unknown) =>
+        console.error("[reconciler] periodic reconciliation error:", err)
+      );
+    }, 60_000);
   }
 
   private initWebSocket(): void {
@@ -430,18 +445,24 @@ export class Reconciler {
 
         if (!openPos && dbTrades.length > 0) {
           // Exchange has no position but DB has OPEN/CLOSING trades — close them
-          if (closingTrades.length > 0) {
-            // These were in CLOSING — reconciler will let the WS order event finalize,
-            // but if it's been more than 30s we should close them now
-            console.warn(
-              `[reconciler] MISMATCH: ${closingTrades.length} CLOSING trade(s) for ${symbol} but exchange has no position`
-            );
-          } else {
-            console.warn(
-              `[reconciler] MISMATCH: DB has ${dbTrades.length} OPEN trade(s) for ${symbol} but exchange has no position`
-            );
-          }
+          console.warn(`[reconciler] MISMATCH: ${dbTrades.length} trade(s) for ${symbol} but exchange has no position — auto-closing`);
           mismatches += dbTrades.length;
+          await this.closeRemainingOpenTrades(symbol);
+        } else if (openPos && closingTrades.length > 0) {
+          // Close order was placed but the position is still open (unfilled order — common on
+          // testnet with thin liquidity; also covers crash-restart between order placement and fill).
+          // Cancel the stale order so it can't fill late, then force-close the DB trade.
+          // In production, market orders fill in <1s so this path only triggers after restarts.
+          console.warn(`[reconciler] ${closingTrades.length} CLOSING trade(s) for ${symbol} — close order unresolved, cancelling and force-closing`);
+          mismatches += closingTrades.length;
+          for (const t of closingTrades) {
+            if (t.closingOrderId) {
+              await this.bybit.cancelOrder(symbol, t.closingOrderId).catch(() => {
+                // already filled, expired, or cancelled — proceed
+              });
+            }
+          }
+          await this.closeRemainingOpenTrades(symbol);
         } else if (openPos && dbTrades.length === 0) {
           console.warn(
             `[reconciler] MISMATCH: Exchange has open position for ${symbol} (size=${openPos.size}) but DB has no OPEN/CLOSING trades`
