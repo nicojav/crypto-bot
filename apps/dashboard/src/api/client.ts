@@ -60,6 +60,7 @@ export type EquitySummary = {
   sumFundingUsd: number;
   residualUsd: number;
   tradeCount: number;
+  unaccountedTradeCount: number;
 };
 
 export type EquityPoint = {

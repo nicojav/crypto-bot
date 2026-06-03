@@ -75,8 +75,13 @@ export function TradesTable() {
                       </div>
                     )}
                     {t.pnlSource === "EXEC_FALLBACK" && (
-                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Locally estimated — WS order event missed.">
+                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Locally estimated from fill price — WS order event missed.">
                         est.
+                      </span>
+                    )}
+                    {t.pnlSource === "BYBIT_REST" && (
+                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Sourced from Bybit closedPnL REST endpoint.">
+                        rest
                       </span>
                     )}
                     {t.pnlSource === "BYBIT_LIQUIDATION" && (

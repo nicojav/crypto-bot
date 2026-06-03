@@ -66,6 +66,17 @@ export function EquityBreakdown() {
         </>
       )}
       <span className="text-[10px] text-text-3 ml-2">{data.tradeCount} trade{data.tradeCount !== 1 ? "s" : ""}</span>
+      {data.unaccountedTradeCount > 0 && (
+        <>
+          <Divider />
+          <span
+            className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-yellow-500/10 text-yellow-500 border border-yellow-500/20"
+            title={`${data.unaccountedTradeCount} closed trade${data.unaccountedTradeCount !== 1 ? "s" : ""} have no PnL recorded — residual is inflated`}
+          >
+            {data.unaccountedTradeCount} unaccounted
+          </span>
+        </>
+      )}
     </div>
   );
 }
