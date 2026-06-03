@@ -11,7 +11,8 @@
     "test": "vitest run",
     "check-bybit": "tsx ../../scripts/check-bybit.ts",
     "reset-trade-data": "tsx ../../scripts/reset-trade-data.ts",
-    "diagnose-divergence": "tsx ../../scripts/diagnose-divergence.ts"
+    "diagnose-divergence": "tsx ../../scripts/diagnose-divergence.ts",
+    "backfill:pnl": "tsx ../../scripts/backfillRealizedPnl.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

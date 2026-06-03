@@ -98,8 +98,9 @@ const equitySummarySchema = {
     sumFundingUsd: { type: "number" },
     residualUsd: { type: "number" },
     tradeCount: { type: "integer" },
+    unaccountedTradeCount: { type: "integer" },
   },
-  required: ["from", "to", "deltaEquityUsd", "sumRealizedPnlUsd", "sumFeeUsd", "sumFundingUsd", "residualUsd", "tradeCount"],
+  required: ["from", "to", "deltaEquityUsd", "sumRealizedPnlUsd", "sumFeeUsd", "sumFundingUsd", "residualUsd", "tradeCount", "unaccountedTradeCount"],
 } as const;
 
 const equityItem = {
@@ -417,7 +418,7 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
     const fromDate = req.query.from ? new Date(req.query.from) : new Date(new Date().setHours(0, 0, 0, 0));
     const toDate = req.query.to ? new Date(req.query.to) : new Date();
 
-    const [snapshots, trades, fundingAgg] = await Promise.all([
+    const [snapshots, trades, fundingAgg, unaccountedTradeCount] = await Promise.all([
       db.balanceSnapshot.findMany({
         where: { takenAt: { gte: fromDate, lte: toDate } },
         orderBy: { takenAt: "asc" },
@@ -431,6 +432,14 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
       db.fundingEvent.aggregate({
         _sum: { fundingUsd: true },
         where: { execTime: { gte: fromDate, lte: toDate } },
+      }),
+      db.trade.count({
+        where: {
+          status: "CLOSED",
+          closedAt: { gte: fromDate, lte: toDate },
+          realizedPnlUsd: null,
+          pnlUsd: null,
+        },
       }),
     ]);
 
@@ -459,6 +468,7 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
       sumFundingUsd,
       residualUsd,
       tradeCount: trades.length,
+      unaccountedTradeCount,
     };
   });
 

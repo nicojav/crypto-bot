@@ -1,6 +1,6 @@
 import { WebsocketClient } from "bybit-api";
 import type { PrismaClient } from "../generated/prisma/client.js";
-import type { BybitClient } from "../exchange/bybit.js";
+import type { BybitClient, ClosedPnLEntry } from "../exchange/bybit.js";
 import type { EventBus } from "../eventBus.js";
 import { env } from "../env.js";
 
@@ -217,8 +217,10 @@ export class Reconciler {
     closingOrderId: string;
     realizedPnlUsd: number;
     pnlSource: string;
+    entryFillPrice?: number;
+    feeOpenUsd?: number;
   }): Promise<void> {
-    const { tradeId, botId, symbol, exitFillPrice, feeCloseUsd, closingOrderId, realizedPnlUsd, pnlSource } = params;
+    const { tradeId, botId, symbol, exitFillPrice, feeCloseUsd, closingOrderId, realizedPnlUsd, pnlSource, entryFillPrice, feeOpenUsd } = params;
     await this.db.trade.update({
       where: { id: tradeId },
       data: {
@@ -231,6 +233,8 @@ export class Reconciler {
         closingOrderId,
         pnlSource,
         closedAt: new Date(),
+        ...(entryFillPrice !== undefined ? { entryFillPrice } : {}),
+        ...(feeOpenUsd !== undefined ? { feeOpenUsd } : {}),
       },
     });
     this.bus?.publish({ type: "trade.closed", data: { tradeId, botId, symbol, pnlUsd: realizedPnlUsd } });
@@ -346,16 +350,16 @@ export class Reconciler {
     });
     if (openTrades.length === 0) return;
 
-    // Fetch recent executions to get the real fill price
+    // Widen lookup window from oldest open trade's openedAt, capped at 7 days
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const oldestOpenedAt = Math.min(...openTrades.map((t) => t.openedAt.getTime()));
+    const startTime = Math.max(Date.now() - sevenDaysMs, oldestOpenedAt - 5 * 60 * 1000);
+
+    // 1. Try execution list for a real fill price (locally-computed PnL)
     let exitFillPrice: number | null = null;
     let feeCloseUsd = 0;
     try {
-      const execs = await this.bybit.getExecutionList({
-        symbol,
-        startTime: Date.now() - 60_000,
-        limit: 20,
-      });
-      // Pick the most recent reduce-only execution (closedSize > 0)
+      const execs = await this.bybit.getExecutionList({ symbol, startTime, limit: 100 });
       const closeExec = execs
         .filter((e) => e.closedSize > 0)
         .sort((a, b) => b.execTime - a.execTime)[0];
@@ -364,13 +368,14 @@ export class Reconciler {
         feeCloseUsd = closeExec.execFee;
       }
     } catch (err) {
-      console.warn("[reconciler] closeRemainingOpenTrades: getExecutionList failed, falling back to markPrice from DB", err);
+      console.warn("[reconciler] closeRemainingOpenTrades: getExecutionList failed", err);
     }
 
     const now = new Date();
-    for (const trade of openTrades) {
-      if (exitFillPrice !== null) {
-        // Compute PnL from fill price — we don't have closedPnl here, so use EXEC_FALLBACK
+    const nowMs = now.getTime();
+
+    if (exitFillPrice !== null) {
+      for (const trade of openTrades) {
         const realizedPnlUsd =
           (exitFillPrice - trade.entryPrice) * trade.qty * (trade.side === "BUY" ? 1 : -1) - feeCloseUsd;
         await this.db.trade.update({
@@ -387,14 +392,55 @@ export class Reconciler {
           },
         });
         this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: realizedPnlUsd } });
+      }
+      console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);
+      return;
+    }
+
+    // 2. No execution found — try getClosedPnL for Bybit's authoritative per-position PnL
+    let closedPnlEntries: ClosedPnLEntry[] = [];
+    try {
+      closedPnlEntries = await this.bybit.getClosedPnL({ symbol, startTime });
+    } catch (err) {
+      console.warn("[reconciler] closeRemainingOpenTrades: getClosedPnL failed", err);
+    }
+
+    for (const trade of openTrades) {
+      const sideFilter = trade.side === "BUY" ? "Buy" : "Sell";
+      const matched = closedPnlEntries.filter(
+        (e) =>
+          e.side === sideFilter &&
+          Math.abs(e.qty - trade.qty) / Math.max(e.qty, trade.qty) < 0.005 &&
+          e.updatedTime >= trade.openedAt.getTime() - 5 * 60 * 1000 &&
+          e.updatedTime <= nowMs + 5 * 60 * 1000
+      );
+
+      if (matched.length === 1) {
+        const entry = matched[0]!;
+        await this.applyCloseExecution({
+          tradeId: trade.id,
+          botId: trade.botId,
+          symbol,
+          exitFillPrice: entry.avgExitPrice,
+          feeCloseUsd: entry.closeFee,
+          feeOpenUsd: entry.openFee,
+          entryFillPrice: entry.avgEntryPrice,
+          closingOrderId: entry.orderId,
+          realizedPnlUsd: entry.closedPnl,
+          pnlSource: "BYBIT_REST",
+        });
+        console.log(`[reconciler] closedPnl fallback: closed trade #${trade.id} for ${symbol} pnl=${entry.closedPnl.toFixed(4)}`);
       } else {
-        // Last resort: close without fill price data (no execution found)
+        if (matched.length > 1) {
+          console.warn(`[reconciler] closedPnl fallback: ${matched.length} ambiguous matches for trade #${trade.id} ${symbol} — using null PnL`);
+        } else {
+          console.warn(`[reconciler] position closed: trade #${trade.id} for ${symbol} has no execution data`);
+        }
         await this.db.trade.update({
           where: { id: trade.id },
           data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
         });
         this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: null } });
-        console.warn(`[reconciler] position closed: trade #${trade.id} for ${symbol} has no execution data`);
       }
     }
     console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);

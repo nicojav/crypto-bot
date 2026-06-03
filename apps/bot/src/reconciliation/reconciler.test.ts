@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { PrismaClient } from "../generated/prisma/client.js";
-import type { ExecutionFill } from "../exchange/bybit.js";
+import type { ExecutionFill, ClosedPnLEntry } from "../exchange/bybit.js";
 
 vi.mock("../env.js", () => ({
   env: {
@@ -47,9 +47,11 @@ let botId: number;
 
 // Mock BybitClient
 const mockGetExecutionList = vi.fn<() => Promise<ExecutionFill[]>>();
+const mockGetClosedPnL = vi.fn<() => Promise<ClosedPnLEntry[]>>();
 const mockGetPositions = vi.fn();
 const mockBybit = {
   getExecutionList: mockGetExecutionList,
+  getClosedPnL: mockGetClosedPnL,
   getPositions: mockGetPositions,
   getBalance: vi.fn().mockResolvedValue({ coin: "USDT", equity: 1000, available: 900 }),
 } as unknown as import("../exchange/bybit.js").BybitClient;
@@ -399,7 +401,7 @@ describe("closeRemainingOpenTrades", () => {
     expect(openTrades).toHaveLength(0);
   });
 
-  it("closes with no fill data when getExecutionList returns no reduce-only executions", async () => {
+  it("closes with no fill data when getExecutionList returns no reduce-only executions and getClosedPnL returns empty", async () => {
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
     // Execution list has no closedSize > 0
     mockGetExecutionList.mockResolvedValueOnce([
@@ -415,6 +417,7 @@ describe("closeRemainingOpenTrades", () => {
         closedSize: 0, // not a close execution
       },
     ]);
+    mockGetClosedPnL.mockResolvedValueOnce([]); // no closed PnL entries either
 
     const reconciler = new Reconciler(testDb, mockBybit, mockBus);
     await triggerPositionZero(reconciler, "XRPUSDT");
@@ -425,9 +428,70 @@ describe("closeRemainingOpenTrades", () => {
     expect(updated.exitFillPrice).toBeNull();
   });
 
+  it("closes with BYBIT_REST when getExecutionList finds nothing but getClosedPnL matches", async () => {
+    const trade = await createSignalAndTrade({ side: "BUY", qty: 100, entryPrice: 3.00, symbol: "XRPUSDT" });
+    mockGetExecutionList.mockResolvedValueOnce([]); // no executions
+    mockGetClosedPnL.mockResolvedValueOnce([
+      {
+        orderId: "rest-ord-1",
+        symbol: "XRPUSDT",
+        side: "Buy",       // position side = Buy = long = BUY trade
+        qty: 100,
+        avgEntryPrice: 3.00,
+        avgExitPrice: 3.50,
+        closedPnl: 48.75,  // Bybit's authoritative value
+        openFee: 0.15,
+        closeFee: 0.10,
+        createdTime: Date.now() - 5000,
+        updatedTime: Date.now(),
+      },
+    ]);
+
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+    await triggerPositionZero(reconciler, "XRPUSDT");
+
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.status).toBe("CLOSED");
+    expect(updated.pnlSource).toBe("BYBIT_REST");
+    expect(updated.realizedPnlUsd).toBeCloseTo(48.75);
+    expect(updated.exitFillPrice).toBeCloseTo(3.50);
+    expect(updated.feeCloseUsd).toBeCloseTo(0.10);
+    expect(updated.feeOpenUsd).toBeCloseTo(0.15);
+    expect(updated.closingOrderId).toBe("rest-ord-1");
+  });
+
+  it("falls back to null PnL when getClosedPnL returns ambiguous matches", async () => {
+    const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
+    mockGetExecutionList.mockResolvedValueOnce([]);
+    // Two entries with same side+qty — ambiguous
+    const entry = {
+      orderId: "rest-amb",
+      symbol: "XRPUSDT",
+      side: "Buy",
+      qty: 100,
+      avgEntryPrice: 3.00,
+      avgExitPrice: 3.50,
+      closedPnl: 48.75,
+      openFee: 0.15,
+      closeFee: 0.10,
+      createdTime: Date.now() - 5000,
+      updatedTime: Date.now(),
+    };
+    mockGetClosedPnL.mockResolvedValueOnce([entry, { ...entry, orderId: "rest-amb-2" }]);
+
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+    await triggerPositionZero(reconciler, "XRPUSDT");
+
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.status).toBe("CLOSED");
+    expect(updated.pnlSource).toBe("EXEC_FALLBACK");
+    expect(updated.realizedPnlUsd).toBeNull();
+  });
+
   it("closes even when getExecutionList throws", async () => {
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
     mockGetExecutionList.mockRejectedValueOnce(new Error("network failure"));
+    mockGetClosedPnL.mockResolvedValueOnce([]); // closedPnL returns nothing
 
     const reconciler = new Reconciler(testDb, mockBybit, mockBus);
     await triggerPositionZero(reconciler, "XRPUSDT");
