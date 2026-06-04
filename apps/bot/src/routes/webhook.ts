@@ -14,6 +14,8 @@ const bodySchema = z.object({
     .pipe(z.enum(["BUY", "SELL", "CLOSE"])),
   symbol: z.string().min(1),
   price: z.number().optional(),
+  takeProfit: z.number().positive().optional(),
+  stopLoss: z.number().positive().optional(),
   meta: z.record(z.unknown()).optional(),
 });
 
@@ -51,7 +53,7 @@ export const webhookPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (
           .send({ error: "Invalid payload", details: parsed.error.flatten() });
       }
 
-      const { secret, webhookId, action, symbol, price, meta } = parsed.data;
+      const { secret, webhookId, action, symbol, price, takeProfit, stopLoss, meta } = parsed.data;
 
       if (!secretsMatch(secret, env.WEBHOOK_SECRET)) {
         request.log.warn("webhook: bad secret");
@@ -74,7 +76,7 @@ export const webhookPlugin: FastifyPluginAsync<{ db: PrismaClient }> = async (
             botId: bot.id,
             webhookId,
             action,
-            payload: JSON.stringify({ symbol, price, meta }),
+            payload: JSON.stringify({ symbol, price, takeProfit, stopLoss, meta }),
             status: "PENDING",
           },
         });

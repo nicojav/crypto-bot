@@ -177,6 +177,8 @@ export class BybitClient {
     side: "Buy" | "Sell";
     qty: number;
     reduceOnly: boolean;
+    takeProfit?: number;
+    stopLoss?: number;
   }): Promise<string> {
     // No retry on order placement — partial fills and duplicates are dangerous
     const res = await this.client.submitOrder({
@@ -186,6 +188,8 @@ export class BybitClient {
       orderType: "Market",
       qty: String(params.qty),
       reduceOnly: params.reduceOnly,
+      ...(params.takeProfit != null ? { takeProfit: String(params.takeProfit), tpslMode: "Full" } : {}),
+      ...(params.stopLoss != null ? { stopLoss: String(params.stopLoss), tpslMode: "Full" } : {}),
     });
     if (res.retCode !== 0) bybitError(res);
     return res.result.orderId;

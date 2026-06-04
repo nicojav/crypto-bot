@@ -84,6 +84,11 @@ export function TradesTable() {
                         rest
                       </span>
                     )}
+                    {t.pnlSource === "BYBIT_REST_GROUPED" && (
+                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="PnL is a proportional share of a grouped Bybit closedPnL entry (multiple bot trades aggregated into one Bybit position).">
+                        rest-grouped
+                      </span>
+                    )}
                     {t.pnlSource === "BYBIT_LIQUIDATION" && (
                       <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-red/10 text-red border border-red/20" title="Position was force-closed by the exchange.">
                         liquidated

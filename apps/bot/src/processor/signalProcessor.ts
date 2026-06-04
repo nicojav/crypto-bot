@@ -9,7 +9,7 @@ export interface Exchange {
   getPositions(symbol: string): Promise<Array<{ side: "Buy" | "Sell" | "None"; size: number }>>;
   getInstrumentInfo(symbol: string): Promise<{ lotSize: number; minQty: number }>;
   setLeverage(symbol: string, leverage: number): Promise<void>;
-  placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean }): Promise<string>;
+  placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean; takeProfit?: number; stopLoss?: number }): Promise<string>;
 }
 
 function decimalsOf(lotSize: number): number {
@@ -221,6 +221,14 @@ export class SignalProcessor {
       return;
     }
 
+    // Parse TP/SL from the stored webhook payload (stored as JSON by webhook.ts)
+    const parsedPayload = (() => {
+      try { return JSON.parse(signal.payload ?? "{}") as { takeProfit?: number; stopLoss?: number }; }
+      catch { return {}; }
+    })();
+    const takeProfit = typeof parsedPayload.takeProfit === "number" ? parsedPayload.takeProfit : undefined;
+    const stopLoss = typeof parsedPayload.stopLoss === "number" ? parsedPayload.stopLoss : undefined;
+
     const instrument = await this.exchange.getInstrumentInfo(symbol);
     const markPrice = await this.exchange.getMarkPrice(symbol);
     const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, markPrice, instrument.lotSize);
@@ -237,8 +245,16 @@ export class SignalProcessor {
     const side = signal.action === "BUY" ? "Buy" : "Sell";
 
     const existing = await this.db.trade.findMany({
-      where: { botId: bot.id, symbol, status: "OPEN" },
+      where: { botId: bot.id, symbol, status: { in: ["OPEN", "CLOSING"] } },
     });
+
+    // Reject duplicate same-side signals to enforce 1:1 Trade↔Position
+    const sameSide = existing.find((t) => t.side === signal.action);
+    if (sameSide) {
+      await this.reject(signal.id, `Duplicate ${signal.action}: OPEN trade #${sameSide.id} already exists for ${symbol}`, bot.id);
+      return;
+    }
+
     if (existing.some((t) => t.side !== signal.action)) {
       const positions = await this.exchange.getPositions(symbol);
       const oppositePos = positions.find((p) => p.size > 0);
@@ -265,7 +281,7 @@ export class SignalProcessor {
       }
     }
 
-    const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
+    const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false, takeProfit, stopLoss });
 
     const [, liveTrade] = await this.db.$transaction([
       this.db.signal.update({

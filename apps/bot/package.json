@@ -13,7 +13,8 @@
     "reset-trade-data": "tsx ../../scripts/reset-trade-data.ts",
     "diagnose-divergence": "tsx ../../scripts/diagnose-divergence.ts",
     "backfill:pnl": "tsx src/scripts/backfillRealizedPnl.ts",
-    "mark-phantoms": "tsx src/scripts/markPhantomTrades.ts"
+    "mark-phantoms": "tsx src/scripts/markPhantomTrades.ts",
+    "backfill:pnl-grouped": "tsx src/scripts/backfillRealizedPnlGrouped.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
