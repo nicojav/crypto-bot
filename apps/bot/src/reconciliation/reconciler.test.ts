@@ -401,9 +401,11 @@ describe("closeRemainingOpenTrades", () => {
     expect(openTrades).toHaveLength(0);
   });
 
-  it("closes with no fill data when getExecutionList returns no reduce-only executions and getClosedPnL returns empty", async () => {
+  it("closes with EXEC_FALLBACK when getExecutionList returns no reduce-only executions and getClosedPnL returns empty (old trade)", async () => {
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
-    // Execution list has no closedSize > 0
+    // Backdate openedAt so the trade is not phantom (older than 5s)
+    await testDb.trade.update({ where: { id: trade.id }, data: { openedAt: new Date(Date.now() - 10_000) } });
+
     mockGetExecutionList.mockResolvedValueOnce([
       {
         orderId: "open-ord",
@@ -426,6 +428,22 @@ describe("closeRemainingOpenTrades", () => {
     expect(updated.status).toBe("CLOSED");
     expect(updated.pnlSource).toBe("EXEC_FALLBACK");
     expect(updated.exitFillPrice).toBeNull();
+  });
+
+  it("marks trade as PHANTOM (pnlUsd=0) when no Bybit data and trade was just opened", async () => {
+    // Trade created with openedAt ≈ now (< 5s old) — phantom fingerprint
+    const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
+    mockGetExecutionList.mockResolvedValueOnce([]);
+    mockGetClosedPnL.mockResolvedValueOnce([]);
+
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+    await triggerPositionZero(reconciler, "XRPUSDT");
+
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.status).toBe("CLOSED");
+    expect(updated.pnlSource).toBe("PHANTOM");
+    expect(updated.pnlUsd).toBe(0);
+    expect(updated.realizedPnlUsd).toBe(0);
   });
 
   it("closes with BYBIT_REST when getExecutionList finds nothing but getClosedPnL matches", async () => {
@@ -462,6 +480,8 @@ describe("closeRemainingOpenTrades", () => {
 
   it("falls back to null PnL when getClosedPnL returns ambiguous matches", async () => {
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
+    // Backdate so the trade is old enough to not be phantom
+    await testDb.trade.update({ where: { id: trade.id }, data: { openedAt: new Date(Date.now() - 10_000) } });
     mockGetExecutionList.mockResolvedValueOnce([]);
     // Two entries with same side+qty — ambiguous
     const entry = {

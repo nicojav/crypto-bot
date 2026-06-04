@@ -436,11 +436,18 @@ export class Reconciler {
         } else {
           console.warn(`[reconciler] position closed: trade #${trade.id} for ${symbol} has no execution data`);
         }
+        const ageMs = nowMs - trade.openedAt.getTime();
+        const isPhantom = ageMs < 5_000;
         await this.db.trade.update({
           where: { id: trade.id },
-          data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
+          data: isPhantom
+            ? { status: "CLOSED", pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM", closedAt: now }
+            : { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
         });
-        this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: null } });
+        if (isPhantom) {
+          console.warn(`[reconciler] phantom: trade #${trade.id} for ${symbol} had no Bybit record (age=${ageMs}ms) — marked as PHANTOM`);
+        }
+        this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: isPhantom ? 0 : null } });
       }
     }
     console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);

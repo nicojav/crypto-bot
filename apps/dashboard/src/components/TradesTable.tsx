@@ -89,6 +89,11 @@ export function TradesTable() {
                         liquidated
                       </span>
                     )}
+                    {t.pnlSource === "PHANTOM" && (
+                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Position recorded locally but no execution on Bybit — counted as 0 PnL.">
+                        phantom
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
