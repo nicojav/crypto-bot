@@ -4,6 +4,14 @@ Items requested during development, deferred for after testnet validation.
 
 ---
 
+## Deployment infrastructure (staging, CI, blue/green)
+
+**Status:** Planned — see [`DEPLOYMENT_INFRASTRUCTURE.md`](DEPLOYMENT_INFRASTRUCTURE.md)
+
+**Requested:** Prompted by the PnL backfill incident — maintenance scripts had to run on production because no staging exists. Phased plan covers: Railway staging env, branch-based deploys + GitHub Actions CI, `--confirm-production` flag for scripts, graceful shutdown + Cloudflare webhook buffer, Postgres migration, and Railway rolling/blue-green deploys. Phases A–C are this-week wins; D–F are required before live funds.
+
+---
+
 ## Live unrealized PnL for open trades
 
 **Status:** Pending
