@@ -557,6 +557,106 @@ describe("SignalProcessor", () => {
     }));
   });
 
+  it("TP/SL price-band rejection (30208) → retries naked, signal EXECUTED", async () => {
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.getPositions.mockResolvedValue([]);
+    // First call (with TP/SL) throws 30208; second call (naked) succeeds
+    exchange.placeMarketOrder
+      .mockRejectedValueOnce(new Error("Bybit error 30208: Failed to submit order(s). The order price is higher than the maximum buying price."))
+      .mockResolvedValueOnce("order-retry-naked");
+
+    const processor = new SignalProcessor(testDb, exchange);
+
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 50100, stopLoss: 49900 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    // Signal should EXECUTE (not REJECT) because the naked retry succeeded
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("EXECUTED");
+    expect(updated.rejectionReason).toBeNull();
+
+    // placeMarketOrder called twice: first with TP/SL, then without
+    expect(exchange.placeMarketOrder).toHaveBeenCalledTimes(2);
+    expect(exchange.placeMarketOrder).toHaveBeenNthCalledWith(1,
+      expect.objectContaining({ takeProfit: expect.any(Number), stopLoss: expect.any(Number) })
+    );
+    expect(exchange.placeMarketOrder).toHaveBeenNthCalledWith(2,
+      expect.objectContaining({ symbol: "BTCUSDT", side: "Buy", reduceOnly: false })
+    );
+    // Second call must NOT include TP/SL
+    const secondCall = exchange.placeMarketOrder.mock.calls[1][0] as Record<string, unknown>;
+    expect(secondCall.takeProfit).toBeUndefined();
+    expect(secondCall.stopLoss).toBeUndefined();
+
+    // Trade should be created
+    const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
+    expect(trade).not.toBeNull();
+    expect(trade?.exchangeOrderId).toBe("order-retry-naked");
+  });
+
+  it("TP/SL 10001 bracket-range rejection → retries naked, signal EXECUTED", async () => {
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.getPositions.mockResolvedValue([]);
+    exchange.placeMarketOrder
+      .mockRejectedValueOnce(new Error("Bybit error 10001: [abc-123]sell: [645570000,657840000] invalid"))
+      .mockResolvedValueOnce("order-retry-10001");
+
+    const processor = new SignalProcessor(testDb, exchange);
+
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "SELL",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 49900, stopLoss: 50100 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("EXECUTED");
+    expect(exchange.placeMarketOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it("non-TP/SL exchange error is NOT retried → signal REJECTED", async () => {
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.getPositions.mockResolvedValue([]);
+    exchange.placeMarketOrder.mockRejectedValueOnce(new Error("Bybit error 110001: insufficient balance"));
+
+    const processor = new SignalProcessor(testDb, exchange);
+    const signal = await createPendingSignal("BUY");
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("REJECTED");
+    expect(updated.rejectionReason).toMatch(/insufficient balance/);
+    // Only one attempt — no retry for non-price errors
+    expect(exchange.placeMarketOrder).toHaveBeenCalledTimes(1);
+  });
+
   it("BUY signal in dry-run mode → EXECUTED with synthetic Trade, no exchange call", async () => {
     const dryBot = await testDb.bot.create({
       data: {

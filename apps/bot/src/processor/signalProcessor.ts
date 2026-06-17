@@ -315,7 +315,22 @@ export class SignalProcessor {
       }
     }
 
-    const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false, takeProfit, stopLoss });
+    // Place the entry order. If Bybit rejects the TP/SL on price-constraint grounds
+    // (too close to market, outside price band, etc.), retry without the bracket so the
+    // entry still opens — position will exit on the next EMA cross instead.
+    let orderId: string;
+    try {
+      orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false, takeProfit, stopLoss });
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      const isTPSLPriceError = /30208|30209|10001/.test(msg);
+      if ((takeProfit != null || stopLoss != null) && isTPSLPriceError) {
+        console.warn(`[processor] TP/SL rejected by Bybit (${msg.slice(0, 100)}) — retrying entry without TP/SL`);
+        orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
+      } else {
+        throw err;
+      }
+    }
 
     const [, liveTrade] = await this.db.$transaction([
       this.db.signal.update({
