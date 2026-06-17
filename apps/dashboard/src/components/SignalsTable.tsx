@@ -59,9 +59,17 @@ export function SignalsTable() {
                     {s.action}
                   </td>
                   <td className="px-5 py-3 text-right">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[s.status] ?? "bg-surface text-text-3"}`}>
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[s.status] ?? "bg-surface text-text-3"}`}
+                      title={s.rejectionReason ?? undefined}
+                    >
                       {s.status.toLowerCase()}
                     </span>
+                    {s.status === "REJECTED" && s.rejectionReason && (
+                      <div className="mt-1 text-xs text-red/70 text-right max-w-[200px] ml-auto truncate" title={s.rejectionReason}>
+                        {s.rejectionReason}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -190,6 +190,77 @@ describe("PATCH /api/bots/:id", () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  it("updates name and symbol when no open positions", async () => {
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/bots/${botId}`,
+      headers: AUTH,
+      payload: { name: "Renamed Bot", symbol: "SOLUSDT" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ name: string; symbol: string }>();
+    expect(body.name).toBe("Renamed Bot");
+    expect(body.symbol).toBe("SOLUSDT");
+    // Restore for other tests
+    await testDb.bot.update({ where: { id: botId }, data: { name: "Alpha Bot", symbol: "BTCUSDT" } });
+  });
+
+  it("symbol is normalised to uppercase on update", async () => {
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/bots/${botId}`,
+      headers: AUTH,
+      payload: { symbol: "xrpusdt" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ symbol: string }>().symbol).toBe("XRPUSDT");
+    await testDb.bot.update({ where: { id: botId }, data: { symbol: "BTCUSDT" } });
+  });
+
+  it("changing symbol with an OPEN trade → 409", async () => {
+    // Create an OPEN trade for botId
+    const sig = await testDb.signal.create({
+      data: { botId, webhookId: `wh-guard-${randomUUID()}`, action: "BUY", payload: "{}", status: "EXECUTED" },
+    });
+    const trade = await testDb.trade.create({
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-guard", symbol: "BTCUSDT", side: "BUY", qty: 0.01, entryPrice: 50000, status: "OPEN" },
+    });
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/bots/${botId}`,
+      headers: AUTH,
+      payload: { symbol: "ETHUSDT" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json<{ error: string }>().error).toMatch(/open/i);
+
+    // Cleanup
+    await testDb.trade.delete({ where: { id: trade.id } });
+    await testDb.signal.delete({ where: { id: sig.id } });
+  });
+
+  it("changing symbol when already matching (same value) → 200 even with OPEN trade", async () => {
+    // Open trade exists but symbol isn't actually changing
+    const sig = await testDb.signal.create({
+      data: { botId, webhookId: `wh-same-${randomUUID()}`, action: "BUY", payload: "{}", status: "EXECUTED" },
+    });
+    const trade = await testDb.trade.create({
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-same", symbol: "BTCUSDT", side: "BUY", qty: 0.01, entryPrice: 50000, status: "OPEN" },
+    });
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/bots/${botId}`,
+      headers: AUTH,
+      payload: { symbol: "BTCUSDT" },  // same symbol — guard should not fire
+    });
+    expect(res.statusCode).toBe(200);
+
+    await testDb.trade.delete({ where: { id: trade.id } });
+    await testDb.signal.delete({ where: { id: sig.id } });
+  });
 });
 
 // ── GET /api/trades ───────────────────────────────────────────────────────────

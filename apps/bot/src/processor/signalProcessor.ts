@@ -7,14 +7,14 @@ type SignalWithBot = Signal & { bot: Bot };
 export interface Exchange {
   getMarkPrice(symbol: string): Promise<number>;
   getPositions(symbol: string): Promise<Array<{ side: "Buy" | "Sell" | "None"; size: number }>>;
-  getInstrumentInfo(symbol: string): Promise<{ lotSize: number; minQty: number }>;
+  getInstrumentInfo(symbol: string): Promise<{ lotSize: number; minQty: number; tickSize: number }>;
   setLeverage(symbol: string, leverage: number): Promise<void>;
   placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean; takeProfit?: number; stopLoss?: number }): Promise<string>;
 }
 
-function decimalsOf(lotSize: number): number {
-  if (!Number.isFinite(lotSize) || lotSize <= 0) return 0;
-  const s = lotSize.toString();
+function decimalsOf(step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return 0;
+  const s = step.toString();
   if (s.includes("e-")) return Number(s.split("e-")[1]);
   if (s.includes("e+")) return 0;
   const dot = s.indexOf(".");
@@ -24,6 +24,13 @@ function decimalsOf(lotSize: number): number {
 export function calcQty(maxUsd: number, leverage: number, markPrice: number, lotSize: number): number {
   const steps = Math.floor(maxUsd * leverage / markPrice / lotSize);
   return Number((steps * lotSize).toFixed(decimalsOf(lotSize)));
+}
+
+/** Round a price to the nearest instrument tick, preventing Bybit error 10001 on excess decimals. */
+export function roundToTick(price: number, tickSize: number): number {
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return price;
+  const steps = Math.round(price / tickSize);
+  return Number((steps * tickSize).toFixed(decimalsOf(tickSize)));
 }
 
 function pnlForTrade(trade: Trade, exitPrice: number): number {
@@ -72,6 +79,13 @@ export class SignalProcessor {
     const payload = JSON.parse(signal.payload) as { symbol: string; price?: number };
     const { symbol } = payload;
     this.bus?.publish({ type: "signal.received", data: { signalId: signal.id, botId: bot.id, action: signal.action, symbol } });
+
+    // Guard: reject if payload symbol doesn't match the bot's configured symbol.
+    // Prevents silent mis-routing when a TradingView alert is pointed at the wrong /webhook/:botId.
+    if (symbol !== bot.symbol) {
+      await this.reject(signal.id, `Symbol mismatch: signal ${symbol} ≠ bot ${bot.symbol}`, bot.id);
+      return;
+    }
 
     // Kill-switch applies to all actions; other risk checks skip CLOSE (reduces exposure)
     if (!bot.enabled) {
@@ -221,13 +235,14 @@ export class SignalProcessor {
       return;
     }
 
-    // Parse TP/SL from the stored webhook payload (stored as JSON by webhook.ts)
+    // Parse TP/SL (and the bar-close price at signal time) from the stored webhook payload.
     const parsedPayload = (() => {
-      try { return JSON.parse(signal.payload ?? "{}") as { takeProfit?: number; stopLoss?: number }; }
+      try { return JSON.parse(signal.payload ?? "{}") as { price?: number; takeProfit?: number; stopLoss?: number }; }
       catch { return {}; }
     })();
-    const takeProfit = typeof parsedPayload.takeProfit === "number" ? parsedPayload.takeProfit : undefined;
-    const stopLoss = typeof parsedPayload.stopLoss === "number" ? parsedPayload.stopLoss : undefined;
+    const signalBarPrice = typeof parsedPayload.price === "number" ? parsedPayload.price : undefined;
+    const rawTakeProfit = typeof parsedPayload.takeProfit === "number" ? parsedPayload.takeProfit : undefined;
+    const rawStopLoss = typeof parsedPayload.stopLoss === "number" ? parsedPayload.stopLoss : undefined;
 
     const instrument = await this.exchange.getInstrumentInfo(symbol);
     const markPrice = await this.exchange.getMarkPrice(symbol);
@@ -236,6 +251,25 @@ export class SignalProcessor {
     if (qty < instrument.minQty) {
       await this.reject(signal.id, `Calculated qty ${qty} is below minQty ${instrument.minQty}`, bot.id);
       return;
+    }
+
+    // Re-anchor TP/SL from bar-close to live mark price, preserving the strategy's ATR distances.
+    // This prevents Bybit error 10001 when price drifts between bar-close and order execution.
+    const ref = signalBarPrice ?? markPrice; // fall back to markPrice if Pine didn't send price
+    const tick = instrument.tickSize;
+    let takeProfit: number | undefined;
+    let stopLoss: number | undefined;
+    if (rawTakeProfit != null) {
+      const anchored = roundToTick(markPrice + (rawTakeProfit - ref), tick);
+      const valid = signal.action === "BUY" ? anchored > markPrice : anchored < markPrice;
+      if (valid) { takeProfit = anchored; }
+      else { console.warn(`[processor] ${signal.action} TP ${anchored} is on wrong side of markPrice ${markPrice} after re-anchor — dropping TP`); }
+    }
+    if (rawStopLoss != null) {
+      const anchored = roundToTick(markPrice + (rawStopLoss - ref), tick);
+      const valid = signal.action === "BUY" ? anchored < markPrice : anchored > markPrice;
+      if (valid) { stopLoss = anchored; }
+      else { console.warn(`[processor] ${signal.action} SL ${anchored} is on wrong side of markPrice ${markPrice} after re-anchor — dropping SL`); }
     }
 
     await this.exchange.setLeverage(symbol, bot.maxLeverage).catch((err: unknown) => {

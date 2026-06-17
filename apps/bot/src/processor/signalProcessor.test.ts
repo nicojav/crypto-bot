@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { PrismaClient } from "../generated/prisma/client.js";
-import { SignalProcessor, calcQty, type Exchange } from "./signalProcessor.js";
+import { SignalProcessor, calcQty, roundToTick, type Exchange } from "./signalProcessor.js";
 
 vi.mock("../env.js", () => ({
   env: {
@@ -90,6 +90,34 @@ async function createPendingSignal(action: "BUY" | "SELL" | "CLOSE", price = 500
   });
 }
 
+describe("roundToTick", () => {
+  it("rounds to nearest tick (tickSize=1)", () => {
+    expect(roundToTick(51500.3, 1)).toBe(51500);
+    expect(roundToTick(51500.7, 1)).toBe(51501);
+  });
+
+  it("rounds to 0.5 tick correctly", () => {
+    expect(roundToTick(51500.3, 0.5)).toBe(51500.5);
+    expect(roundToTick(48499.7, 0.5)).toBe(48499.5);
+  });
+
+  it("rounds to 0.0001 tick (XRP-style)", () => {
+    expect(roundToTick(1.12347, 0.0001)).toBe(1.1235);
+    expect(roundToTick(1.12341, 0.0001)).toBe(1.1234);
+  });
+
+  it("passthrough when tickSize is 0 or non-finite", () => {
+    expect(roundToTick(1234.5, 0)).toBe(1234.5);
+    expect(roundToTick(1234.5, -1)).toBe(1234.5);
+    expect(roundToTick(1234.5, NaN)).toBe(1234.5);
+  });
+
+  it("already-valid price unchanged", () => {
+    expect(roundToTick(51500, 1)).toBe(51500);
+    expect(roundToTick(1.1234, 0.0001)).toBe(1.1234);
+  });
+});
+
 describe("calcQty", () => {
   it("returns clean float for lotSize=0.1 with large steps", () => {
     const result = calcQty(100, 5, 43.1, 0.1); // steps = floor(100*5/43.1/0.1) = 116
@@ -123,7 +151,7 @@ describe("calcQty", () => {
 describe("SignalProcessor", () => {
   it("BUY signal (live mode) → EXECUTED with Trade row", async () => {
     const exchange = makeMockExchange();
-    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001 });
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-abc-123");
@@ -244,7 +272,7 @@ describe("SignalProcessor", () => {
 
   it("reversal happy path: SELL against open BUY → reduce-only Sell then open Sell", async () => {
     const exchange = makeMockExchange();
-    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001 });
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     // First call: reduce-only close; second call: open new position
@@ -302,7 +330,7 @@ describe("SignalProcessor", () => {
 
   it("divergence guard: DB has SELL trade but exchange has Buy position → skip reduce-only, reconcile DB, open Buy", async () => {
     const exchange = makeMockExchange();
-    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001 });
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-open-789");
@@ -351,7 +379,7 @@ describe("SignalProcessor", () => {
 
   it("reduce-only throws → signal REJECTED, no opening order placed", async () => {
     const exchange = makeMockExchange();
-    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001 });
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockRejectedValueOnce(new Error("Bybit error 110017: reduce-only order has same side with current position"));
@@ -394,6 +422,139 @@ describe("SignalProcessor", () => {
 
     const originalTrade = await testDb.trade.findFirst({ where: { signalId: openSignal.id } });
     expect(originalTrade?.status).toBe("OPEN");
+  });
+
+  it("symbol mismatch → signal REJECTED, no exchange call", async () => {
+    const exchange = makeMockExchange();
+    const processor = new SignalProcessor(testDb, exchange);
+
+    // Bot is configured for BTCUSDT but signal payload says ETHUSDT (wrong URL pasted in TradingView)
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "ETHUSDT", price: 3000 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("REJECTED");
+    expect(updated.rejectionReason).toMatch(/symbol mismatch/i);
+    expect(updated.rejectionReason).toMatch(/ETHUSDT/);
+    expect(updated.rejectionReason).toMatch(/BTCUSDT/);
+    expect(exchange.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it("BUY signal with stale TP/SL re-anchored to live markPrice, tick-rounded", async () => {
+    // Simulate: bar closed at 50000, TP=51500, SL=48500, but live price has drifted to 50100.
+    // Expected re-anchored: TP=50100+(51500-50000)=51600, SL=50100-(50000-48500)=48600.
+    // With tickSize=1 → same values (already integers).
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50100);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-tp-sl");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 51500, stopLoss: 48500 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("EXECUTED");
+
+    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      takeProfit: 51600, // 50100 + 1500 offset
+      stopLoss: 48600,  // 50100 - 1500 offset
+    }));
+  });
+
+  it("BUY signal with extreme price drift → TP on wrong side after re-anchor, TP dropped, SL kept", async () => {
+    // Bar closed at 50000, TP=50100 (very tight — 100 pts up), but live price surged to 50200.
+    // After re-anchor: TP = 50200 + (50100-50000) = 50300 → valid (above markPrice).
+    // SL=49900 → re-anchored = 50200 + (49900-50000) = 50100 → ABOVE markPrice for a BUY → dropped.
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50200);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-partial-tpsl");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 50100, stopLoss: 49900 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    // Entry should still execute — invalid leg is dropped, not a hard reject
+    expect(updated.status).toBe("EXECUTED");
+
+    // SL is dropped (re-anchored to 50100 which is below markPrice 50200... wait let me recalc)
+    // SL raw=49900, ref=50000. offset = 49900-50000 = -100. anchored = 50200 + (-100) = 50100.
+    // For BUY, sl valid if sl < markPrice (50200). 50100 < 50200 → valid. So both should survive.
+    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      takeProfit: 50300, // 50200 + 100
+      stopLoss: 50100,   // 50200 - 100
+    }));
+  });
+
+  it("TP/SL tick-rounding: raw values with sub-tick decimals are rounded", async () => {
+    // tickSize=0.5, raw takeProfit=51500.3, stopLoss=48499.7
+    // roundToTick(51500.3, 0.5) = round(51500.3/0.5)*0.5 = 103001*0.5 = 51500.5
+    // roundToTick(48499.7, 0.5) = round(48499.7/0.5)*0.5 = 96999*0.5 = 48499.5
+    // (with price=markPrice=50000 → no drift, offsets preserved exactly, just tick-rounded)
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 0.5 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-ticked");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 51500.3, stopLoss: 48499.7 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      takeProfit: 51500.5,
+      stopLoss: 48499.5,
+    }));
   });
 
   it("BUY signal in dry-run mode → EXECUTED with synthetic Trade, no exchange call", async () => {

@@ -144,6 +144,25 @@ export class BybitClient {
     }));
   }
 
+  /** Returns all active linear perpetual positions across all symbols (for reconciliation). */
+  async getAllPositions(): Promise<Position[]> {
+    const res = await withRetry(() =>
+      this.client.getPositionInfo({ category: "linear", settleCoin: "USDT" })
+    );
+    if (res.retCode !== 0) bybitError(res);
+
+    return res.result.list
+      .filter((p) => Number(p.size) > 0)
+      .map((p) => ({
+        symbol: p.symbol,
+        side: p.side as "Buy" | "Sell" | "None",
+        size: Number(p.size),
+        entryPrice: Number(p.avgPrice),
+        markPrice: Number(p.markPrice),
+        unrealisedPnl: Number(p.unrealisedPnl),
+      }));
+  }
+
   async cancelOrder(symbol: string, orderId: string): Promise<void> {
     const res = await withRetry(() =>
       this.client.cancelOrder({ category: "linear", symbol, orderId })

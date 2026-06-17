@@ -149,6 +149,8 @@ interface CreateBotBody {
 }
 
 interface PatchBotBody {
+  name?: string;
+  symbol?: string;
   enabled?: boolean;
   dryRun?: boolean;
   maxPositionUsd?: number;
@@ -292,10 +294,12 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
       body: {
         type: "object",
         properties: {
-          enabled: { type: "boolean" },
-          dryRun: { type: "boolean" },
-          maxPositionUsd: { type: "number", exclusiveMinimum: 0 },
-          maxLeverage: { type: "integer", minimum: 1 },
+          name:              { type: "string", minLength: 1 },
+          symbol:            { type: "string", minLength: 1 },
+          enabled:           { type: "boolean" },
+          dryRun:            { type: "boolean" },
+          maxPositionUsd:    { type: "number", exclusiveMinimum: 0 },
+          maxLeverage:       { type: "integer", minimum: 1 },
           dailyLossLimitUsd: { type: "number" },
         },
         additionalProperties: false,
@@ -304,6 +308,22 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
       response: { 200: botDetail, 404: errorSchema },
     },
   }, async (req, reply) => {
+    // Guard: reject symbol changes while the bot has open or closing positions
+    if (req.body.symbol !== undefined) {
+      const current = await db.bot.findUnique({ where: { id: req.params.id } });
+      if (!current) return reply.status(404).send({ error: "Not found" });
+      if (req.body.symbol.toUpperCase() !== current.symbol) {
+        const openCount = await db.trade.count({
+          where: { botId: req.params.id, status: { in: ["OPEN", "CLOSING"] } },
+        });
+        if (openCount > 0) {
+          return reply.status(409).send({ error: "Cannot change symbol while positions are open" });
+        }
+      }
+      // Normalise to uppercase regardless
+      req.body.symbol = req.body.symbol.toUpperCase();
+    }
+
     try {
       const bot = await db.bot.update({ where: { id: req.params.id }, data: req.body });
       return { ...bot, createdAt: bot.createdAt.toISOString(), signals: [], trades: [] };
@@ -580,5 +600,122 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
   }, async () => {
     const result = await db.bot.updateMany({ where: { enabled: true }, data: { enabled: false } });
     return { disabled: result.count };
+  });
+
+  // GET /api/reconcile
+  // Compares live Bybit positions against DB OPEN/CLOSING trades and returns orphans in both directions.
+  // Read-only diagnostic — use POST /api/reconcile/close to flatten an orphaned exchange position.
+  fastify.get("/api/reconcile", {
+    schema: {
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            orphanedOnExchange: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  symbol: { type: "string" },
+                  side: { type: "string" },
+                  size: { type: "number" },
+                  entryPrice: { type: "number" },
+                },
+                required: ["symbol", "side", "size", "entryPrice"],
+              },
+            },
+            orphanedInDb: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  tradeId: { type: "integer" },
+                  symbol: { type: "string" },
+                  side: { type: "string" },
+                  status: { type: "string" },
+                },
+                required: ["tradeId", "symbol", "side", "status"],
+              },
+            },
+          },
+          required: ["orphanedOnExchange", "orphanedInDb"],
+        },
+      },
+    },
+  }, async () => {
+    if (!bybit) return { orphanedOnExchange: [], orphanedInDb: [] };
+
+    const [livePositions, dbTrades] = await Promise.all([
+      bybit.getAllPositions(),
+      db.trade.findMany({ where: { status: { in: ["OPEN", "CLOSING"] } } }),
+    ]);
+
+    // Positions on exchange but no matching OPEN/CLOSING trade in DB
+    const orphanedOnExchange = livePositions.filter(
+      (p) => !dbTrades.some(
+        (t) => t.symbol === p.symbol && t.side === (p.side === "Buy" ? "BUY" : "SELL")
+      )
+    );
+
+    // DB OPEN/CLOSING trades with no matching live exchange position
+    const orphanedInDb = dbTrades.filter(
+      (t) => !livePositions.some(
+        (p) => p.symbol === t.symbol && (p.side === "Buy" ? "BUY" : "SELL") === t.side
+      )
+    );
+
+    return {
+      orphanedOnExchange: orphanedOnExchange.map((p) => ({
+        symbol: p.symbol,
+        side: p.side,
+        size: p.size,
+        entryPrice: p.entryPrice,
+      })),
+      orphanedInDb: orphanedInDb.map((t) => ({
+        tradeId: t.id,
+        symbol: t.symbol,
+        side: t.side,
+        status: t.status,
+      })),
+    };
+  });
+
+  // POST /api/reconcile/close?symbol=XRPUSDT
+  // Flattens an orphaned exchange position for the given symbol via a reduce-only market order.
+  fastify.post<{ Querystring: { symbol: string } }>("/api/reconcile/close", {
+    schema: {
+      querystring: {
+        type: "object",
+        properties: { symbol: { type: "string" } },
+        required: ["symbol"],
+      },
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            orderId: { type: "string" },
+            symbol: { type: "string" },
+            side: { type: "string" },
+            qty: { type: "number" },
+          },
+          required: ["orderId", "symbol", "side", "qty"],
+        },
+      },
+    },
+  }, async (req, reply) => {
+    if (!bybit) return reply.status(503).send({ error: "Exchange client not available" });
+
+    const { symbol } = req.query;
+    const positions = await bybit.getPositions(symbol);
+    const pos = positions.find((p) => p.size > 0);
+
+    if (!pos) {
+      return reply.status(404).send({ error: `No open position found for ${symbol} on exchange` });
+    }
+
+    const closeSide = pos.side === "Buy" ? "Sell" as const : "Buy" as const;
+    const orderId = await bybit.placeMarketOrder({ symbol, side: closeSide, qty: pos.size, reduceOnly: true });
+
+    return { orderId, symbol, side: closeSide, qty: pos.size };
   });
 };
