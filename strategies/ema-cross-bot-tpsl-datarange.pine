@@ -1,0 +1,133 @@
+// @version=6
+// EMA crossover strategy with ATR-based TP/SL — fires webhook alerts into the crypto-bot.
+//
+// How it differs from ema-cross.pine:
+//   - Computes a stop-loss (SL) and take-profit (TP) at the moment of each entry,
+//     sized as multiples of the 14-bar ATR. These are sent in the alert payload so
+//     Bybit attaches them to the order server-side. The position then closes
+//     automatically when either level fires, without waiting for the next EMA cross.
+//   - Uses alert() inside each entry branch to build the JSON payload dynamically
+//     (the global alert message field cannot reference per-bar computed values).
+//
+// Date-range filter (NEW):
+//   - Adds an OPT-IN date window for backtesting on plans (e.g. Essential) that
+//     don't include Deep Backtesting. When "Use date filter" is OFF (the default),
+//     the strategy behaves exactly as before — important, because this is a live
+//     bot and you don't want a stray end-date silently halting real trading.
+//   - When ON, entries (and therefore webhook alerts) only fire between Start and
+//     End date, and any open position is flattened once the window closes.
+//   - This narrows a backtest to a chosen period within the bars already loaded on
+//     the chart. It does NOT load extra history — to reach further back, switch to a
+//     higher timeframe (daily/weekly) and/or scroll left to load older bars first.
+//
+// TradingView setup:
+//   1. Add to a chart. TradingView will immediately show the strategy settings
+//      dialog — paste your WEBHOOK_SECRET env var into the "Webhook secret" field.
+//      The value is stored per-chart in TradingView, NOT in the script source,
+//      so the .pine file is safe to commit to git.
+//   2. Review the TP (green) and SL (red) bands. Adjust the ATR multiplier inputs
+//      until the bands look right for your timeframe and symbol.
+//   3. Run the Strategy Tester and compare the equity curve against ema-cross.pine
+//      to pick the better variant before going live.
+//   4. Create one TradingView alert on this strategy with condition:
+//        "Any alert() function call"
+//      Leave the "Message" field empty — the script builds and sends the JSON itself.
+//   5. Set webhook URL: https://your-domain.com/webhook/<botId>
+//      (use ngrok / cloudflared for local dev: ngrok http 3000)
+//
+//   ⚠️ Before going LIVE: make sure "Use date filter" is OFF. Leaving it on with a
+//      past end date will stop the bot from opening new positions.
+//
+// Inputs:
+//   Webhook secret   — your WEBHOOK_SECRET value (stored per-chart, not in source)
+//   Fast EMA length  — default 20
+//   Slow EMA length  — default 50
+//   ATR length       — default 14
+//   SL ATR mult      — default 1.5  (stop placed 1.5× ATR from entry)
+//   TP ATR mult      — default 3.0  (target placed 3× ATR from entry, i.e. 2:1 R:R)
+//   Use TP/SL        — default true (set false to emit plain alerts for A/B testing)
+//   Use date filter  — default false (set true ONLY for backtesting a window)
+//   Start / End date — the backtest window when the filter is on
+
+strategy(
+  title              = "EMA Cross Bot TP/SL",
+  overlay            = true,
+  calc_on_every_tick = false,
+  default_qty_type   = strategy.percent_of_equity,
+  default_qty_value  = 10
+)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+webhookSecret = input.string("", "Webhook secret", confirm=true)
+fastLen       = input.int(20,   "Fast EMA",   minval=2)
+slowLen       = input.int(50,   "Slow EMA",   minval=5)
+atrLen        = input.int(14,   "ATR length", minval=1)
+slMult        = input.float(1.5, "SL ATR mult", minval=0.1, step=0.1)
+tpMult        = input.float(3.0, "TP ATR mult", minval=0.1, step=0.1)
+useTpSl       = input.bool(true, "Use TP/SL")
+
+// ── Date filter inputs (backtesting only) ──────────────────────────────────────
+useDateFilter = input.bool(false, "Use date filter", group="Date range (backtest)", tooltip="OFF for live trading. ON to restrict the backtest to the window below.")
+startDate     = input.time(timestamp("2015-01-01 00:00 +0000"), "Start date", group="Date range (backtest)")
+endDate       = input.time(timestamp("2023-10-02 00:00 +0000"), "End date",   group="Date range (backtest)")
+
+// True when the filter is off (live trading) OR the current bar is inside the window.
+inDateRange = not useDateFilter or (time >= startDate and time <= endDate)
+
+// ── Indicators ────────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+atr     = ta.atr(atrLen)
+
+plot(emaFast, "Fast EMA", color=color.blue,   linewidth=1)
+plot(emaSlow, "Slow EMA", color=color.orange, linewidth=1)
+
+// ── Signals ───────────────────────────────────────────────────────────────────
+// Gated by inDateRange so no entries/alerts fire outside the backtest window.
+longEntry  = ta.crossover(emaFast, emaSlow)  and inDateRange
+shortEntry = ta.crossunder(emaFast, emaSlow) and inDateRange
+
+// ── TP / SL levels (captured once at the entry bar, held until next entry) ───
+var float longSl  = na
+var float longTp  = na
+var float shortSl = na
+var float shortTp = na
+
+if longEntry
+    longSl  := close - atr * slMult
+    longTp  := close + atr * tpMult
+
+if shortEntry
+    shortSl := close + atr * slMult
+    shortTp := close - atr * tpMult
+
+// ── Orders ────────────────────────────────────────────────────────────────────
+if longEntry
+    strategy.close("Short", comment="Exit Short")
+    strategy.entry("Long",  strategy.long)
+    tpSlSuffix = useTpSl ? ',"takeProfit":' + str.tostring(longTp, "#.########") + ',"stopLoss":' + str.tostring(longSl, "#.########") : ''
+    alert('{"secret":"' + webhookSecret + '","webhookId":"' + syminfo.ticker + '-' + timeframe.period + '-' + str.tostring(time) + '-buy","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.########") + tpSlSuffix + '}', alert.freq_once_per_bar_close)
+
+if shortEntry
+    strategy.close("Long",  comment="Exit Long")
+    strategy.entry("Short", strategy.short)
+    tpSlSuffix = useTpSl ? ',"takeProfit":' + str.tostring(shortTp, "#.########") + ',"stopLoss":' + str.tostring(shortSl, "#.########") : ''
+    alert('{"secret":"' + webhookSecret + '","webhookId":"' + syminfo.ticker + '-' + timeframe.period + '-' + str.tostring(time) + '-sell","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.########") + tpSlSuffix + '}', alert.freq_once_per_bar_close)
+
+// ── Window close (backtest only) ───────────────────────────────────────────────
+// Once the filter is on and we pass the end date, cancel pending orders and flatten
+// any open position so the report ends cleanly at the chosen boundary.
+if useDateFilter and time > endDate
+    strategy.cancel_all()
+    strategy.close_all(comment="Date window end")
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+plotshape(longEntry,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, title="Long signal")
+plotshape(shortEntry, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, title="Short signal")
+
+// Shade the active backtest window so it's obvious what's being tested.
+bgcolor(useDateFilter and inDateRange ? color.new(color.blue, 92) : na, title="Backtest window")
+
+// Show current position's TP/SL bands
+plot(strategy.position_size > 0 ? longSl  : strategy.position_size < 0 ? shortSl : na, "SL", color=color.red,   style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size > 0 ? longTp  : strategy.position_size < 0 ? shortTp : na, "TP", color=color.green, style=plot.style_linebr, linewidth=1)
