@@ -81,6 +81,11 @@ export type Signal = {
   rejectionReason: string | null;
 };
 
+export type BotDetail = Bot & {
+  signals: (Signal & { processedAt: string | null })[];
+  trades: Trade[];
+};
+
 export type BotEvent =
   | { type: "signal.received"; data: { signalId: number; botId: number; action: string; symbol: string } }
   | { type: "trade.opened"; data: { tradeId: number; botId: number; symbol: string; side: string; qty: number; entryPrice: number } }
@@ -119,8 +124,10 @@ export const createBot = (data: {
 
 export const patchBot = (
   id: number,
-  data: Partial<Pick<Bot, "enabled" | "dryRun" | "maxPositionUsd" | "maxLeverage" | "dailyLossLimitUsd">>,
+  data: Partial<Pick<Bot, "name" | "symbol" | "enabled" | "dryRun" | "maxPositionUsd" | "maxLeverage" | "dailyLossLimitUsd">>,
 ) => req<Bot>(`/api/bots/${id}`, { method: "PATCH", body: JSON.stringify(data) });
+
+export const fetchBot = (id: number) => req<BotDetail>(`/api/bots/${id}`);
 
 export const fetchTrades = (params?: { botId?: number; limit?: number; from?: string; to?: string }) => {
   const q = new URLSearchParams();
