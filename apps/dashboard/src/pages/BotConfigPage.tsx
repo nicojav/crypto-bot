@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { fetchBot, patchBot } from "../api/client";
 import { Field } from "../components/ui/Field";
 import { Switch } from "../components/ui/Switch";
+import { friendlyReason } from "../utils/rejectionSummary";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
 
@@ -38,6 +39,15 @@ export default function BotConfigPage() {
     enabled: !isNaN(botId),
     staleTime: 15_000,
   });
+
+  const [expandedSignals, setExpandedSignals] = useState<Set<number>>(new Set());
+  function toggleSignal(sigId: number) {
+    setExpandedSignals((prev) => {
+      const next = new Set(prev);
+      next.has(sigId) ? next.delete(sigId) : next.add(sigId);
+      return next;
+    });
+  }
 
   // Identity fields
   const [name, setName] = useState("");
@@ -294,29 +304,53 @@ export default function BotConfigPage() {
                 </tr>
               </thead>
               <tbody>
-                {bot.signals.map((s) => (
-                  <tr key={s.id} className="border-b border-border/50 hover:bg-surface/50 transition-colors">
-                    <td className="px-5 py-3 font-mono text-xs text-text-2 whitespace-nowrap">
-                      {fmtTime.format(new Date(s.receivedAt))}
-                    </td>
-                    <td className={`px-4 py-3 font-semibold text-xs ${ACTION_COLOR[s.action] ?? "text-text-2"}`}>
-                      {s.action}
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[s.status] ?? "bg-surface text-text-3"}`}
-                        title={s.rejectionReason ?? undefined}
+                {bot.signals.map((s) => {
+                  const isExpanded = expandedSignals.has(s.id);
+                  const hasReason = s.status === "REJECTED" && Boolean(s.rejectionReason);
+                  const friendly = hasReason ? friendlyReason(s.rejectionReason!) : null;
+                  return (
+                    <>
+                      <tr
+                        key={s.id}
+                        className={`border-b ${isExpanded ? "border-border/20" : "border-border/50"} hover:bg-surface/50 transition-colors`}
                       >
-                        {s.status.toLowerCase()}
-                      </span>
-                      {s.status === "REJECTED" && s.rejectionReason && (
-                        <div className="mt-1 text-xs text-red/70 text-right max-w-[220px] ml-auto truncate" title={s.rejectionReason}>
-                          {s.rejectionReason}
-                        </div>
+                        <td className="px-5 py-3 font-mono text-xs text-text-2 whitespace-nowrap">
+                          {fmtTime.format(new Date(s.receivedAt))}
+                        </td>
+                        <td className={`px-4 py-3 font-semibold text-xs ${ACTION_COLOR[s.action] ?? "text-text-2"}`}>
+                          {s.action}
+                        </td>
+                        <td className="px-5 py-3 text-right">
+                          <button
+                            onClick={() => hasReason && toggleSignal(s.id)}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[s.status] ?? "bg-surface text-text-3"} ${hasReason ? "cursor-pointer" : "cursor-default"}`}
+                            title={hasReason && !isExpanded ? s.rejectionReason ?? undefined : undefined}
+                          >
+                            {s.status.toLowerCase()}
+                            {hasReason && (
+                              <span className="opacity-50 text-[10px]">{isExpanded ? "▲" : "▼"}</span>
+                            )}
+                          </button>
+                        </td>
+                      </tr>
+                      {hasReason && isExpanded && (
+                        <tr key={`${s.id}-detail`} className="border-b border-border/50 bg-red/[0.03]">
+                          <td colSpan={3} className="px-5 pb-3 pt-1">
+                            {friendly && (
+                              <div className="flex items-start gap-1.5 mb-2 text-xs text-amber">
+                                <span className="mt-px shrink-0">⚠</span>
+                                <span>{friendly}</span>
+                              </div>
+                            )}
+                            <div className="px-3 py-2 rounded-lg bg-red/5 border border-red/15 text-xs font-mono text-red/70 break-all">
+                              {s.rejectionReason}
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                  </tr>
-                ))}
+                    </>
+                  );
+                })}
               </tbody>
             </table>
           </div>
