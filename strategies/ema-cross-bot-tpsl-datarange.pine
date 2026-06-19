@@ -58,7 +58,7 @@ strategy(
 )
 
 // ── Inputs ────────────────────────────────────────────────────────────────────
-webhookSecret = input.string("", "Webhook secret", confirm=true)
+webhookSecret = input.string("", "Webhook secret", confirm=true, display=display.none)
 fastLen       = input.int(20,   "Fast EMA",   minval=2)
 slowLen       = input.int(50,   "Slow EMA",   minval=5)
 atrLen        = input.int(14,   "ATR length", minval=1)
