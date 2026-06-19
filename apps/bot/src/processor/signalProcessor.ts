@@ -235,14 +235,19 @@ export class SignalProcessor {
       return;
     }
 
-    // Parse TP/SL (and the bar-close price at signal time) from the stored webhook payload.
+    // Parse TP/SL from the stored webhook payload.
+    // Preferred: tpPct/slPct (percentage of live markPrice) — all current Pine strategies.
+    // Legacy fallback: absolute takeProfit/stopLoss re-anchored to markPrice (pre-unification signals).
     const parsedPayload = (() => {
-      try { return JSON.parse(signal.payload ?? "{}") as { price?: number; takeProfit?: number; stopLoss?: number }; }
-      catch { return {}; }
+      try { return JSON.parse(signal.payload ?? "{}") as {
+        price?: number; takeProfit?: number; stopLoss?: number; tpPct?: number; slPct?: number;
+      }; } catch { return {}; }
     })();
-    const signalBarPrice = typeof parsedPayload.price === "number" ? parsedPayload.price : undefined;
-    const rawTakeProfit = typeof parsedPayload.takeProfit === "number" ? parsedPayload.takeProfit : undefined;
-    const rawStopLoss = typeof parsedPayload.stopLoss === "number" ? parsedPayload.stopLoss : undefined;
+    const signalBarPrice = typeof parsedPayload.price       === "number" ? parsedPayload.price       : undefined;
+    const tpPct          = typeof parsedPayload.tpPct       === "number" ? parsedPayload.tpPct       : undefined;
+    const slPct          = typeof parsedPayload.slPct       === "number" ? parsedPayload.slPct       : undefined;
+    const rawTakeProfit  = typeof parsedPayload.takeProfit  === "number" ? parsedPayload.takeProfit  : undefined;
+    const rawStopLoss    = typeof parsedPayload.stopLoss    === "number" ? parsedPayload.stopLoss    : undefined;
 
     const instrument = await this.exchange.getInstrumentInfo(symbol);
     const markPrice = await this.exchange.getMarkPrice(symbol);
@@ -253,23 +258,38 @@ export class SignalProcessor {
       return;
     }
 
-    // Re-anchor TP/SL from bar-close to live mark price, preserving the strategy's ATR distances.
-    // This prevents Bybit error 10001 when price drifts between bar-close and order execution.
-    const ref = signalBarPrice ?? markPrice; // fall back to markPrice if Pine didn't send price
     const tick = instrument.tickSize;
     let takeProfit: number | undefined;
     let stopLoss: number | undefined;
-    if (rawTakeProfit != null) {
+
+    // TP — percentage path (primary)
+    if (tpPct != null && tpPct > 0) {
+      takeProfit = roundToTick(
+        markPrice * (signal.action === "BUY" ? 1 + tpPct / 100 : 1 - tpPct / 100),
+        tick,
+      );
+    } else if (rawTakeProfit != null) {
+      // Legacy: re-anchor absolute price from bar-close to live markPrice
+      const ref = signalBarPrice ?? markPrice;
       const anchored = roundToTick(markPrice + (rawTakeProfit - ref), tick);
       const valid = signal.action === "BUY" ? anchored > markPrice : anchored < markPrice;
       if (valid) { takeProfit = anchored; }
-      else { console.warn(`[processor] ${signal.action} TP ${anchored} is on wrong side of markPrice ${markPrice} after re-anchor — dropping TP`); }
+      else { console.warn(`[processor] ${signal.action} TP ${anchored} wrong side of markPrice ${markPrice} — dropping TP`); }
     }
-    if (rawStopLoss != null) {
+
+    // SL — percentage path (primary)
+    if (slPct != null && slPct > 0) {
+      stopLoss = roundToTick(
+        markPrice * (signal.action === "BUY" ? 1 - slPct / 100 : 1 + slPct / 100),
+        tick,
+      );
+    } else if (rawStopLoss != null) {
+      // Legacy: re-anchor absolute price from bar-close to live markPrice
+      const ref = signalBarPrice ?? markPrice;
       const anchored = roundToTick(markPrice + (rawStopLoss - ref), tick);
       const valid = signal.action === "BUY" ? anchored < markPrice : anchored > markPrice;
       if (valid) { stopLoss = anchored; }
-      else { console.warn(`[processor] ${signal.action} SL ${anchored} is on wrong side of markPrice ${markPrice} after re-anchor — dropping SL`); }
+      else { console.warn(`[processor] ${signal.action} SL ${anchored} wrong side of markPrice ${markPrice} — dropping SL`); }
     }
 
     await this.exchange.setLeverage(symbol, bot.maxLeverage).catch((err: unknown) => {

@@ -557,6 +557,127 @@ describe("SignalProcessor", () => {
     }));
   });
 
+  // ── Percentage-based TP/SL (tpPct / slPct) ───────────────────────────────────
+
+  it("BUY with tpPct=1.5 slPct=0.75 → TP and SL computed from live markPrice", async () => {
+    // markPrice=50000, tpPct=1.5 → TP = 50000 × 1.015 = 50750
+    //                   slPct=0.75 → SL = 50000 × 0.9925 = 49625
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-pct-buy");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, tpPct: 1.5, slPct: 0.75 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("EXECUTED");
+    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      takeProfit: 50750, // 50000 × 1.015
+      stopLoss: 49625,   // 50000 × 0.9925
+    }));
+  });
+
+  it("SELL with tpPct=1.5 slPct=0.75 → TP below mark, SL above mark", async () => {
+    // markPrice=50000, tpPct=1.5 → TP = 50000 × 0.985 = 49250
+    //                   slPct=0.75 → SL = 50000 × 1.0075 = 50375
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-pct-sell");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "SELL",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, tpPct: 1.5, slPct: 0.75 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("EXECUTED");
+    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      takeProfit: 49250, // 50000 × 0.985
+      stopLoss: 50375,   // 50000 × 1.0075
+    }));
+  });
+
+  it("tpPct only (no slPct) → TP set, SL undefined", async () => {
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-tp-only");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, tpPct: 2.0 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const call = exchange.placeMarketOrder.mock.calls[0][0] as Record<string, unknown>;
+    expect(call.takeProfit).toBe(51000); // 50000 × 1.02
+    expect(call.stopLoss).toBeUndefined();
+  });
+
+  it("tpPct takes priority over absolute takeProfit when both present", async () => {
+    // tpPct=2.0 → TP=51000; should ignore absolute takeProfit=55000
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.placeMarketOrder.mockResolvedValue("order-pct-priority");
+    exchange.getPositions.mockResolvedValue([]);
+
+    const processor = new SignalProcessor(testDb, exchange);
+    const signal = await testDb.signal.create({
+      data: {
+        botId,
+        webhookId: `wh-${randomUUID()}`,
+        action: "BUY",
+        // Both present — tpPct should win
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, tpPct: 2.0, takeProfit: 55000 }),
+        status: "PENDING",
+      },
+      include: { bot: true },
+    });
+
+    await processor.processSignal(signal);
+
+    const call = exchange.placeMarketOrder.mock.calls[0][0] as Record<string, unknown>;
+    expect(call.takeProfit).toBe(51000); // pct wins: 50000 × 1.02 = 51000
+  });
+
   it("TP/SL price-band rejection (30208) → retries naked, signal EXECUTED", async () => {
     const exchange = makeMockExchange();
     exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });

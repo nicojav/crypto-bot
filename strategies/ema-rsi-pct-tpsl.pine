@@ -1,0 +1,120 @@
+// @version=6
+// EMA crossover + RSI filter with user-defined percentage TP/SL.
+//
+// Designed for smaller timeframes (1m – 15m) where ATR-based TP/SL produces offsets
+// too small to clear Bybit's price-band validation. Instead, the user sets TP and SL
+// as fixed percentages of the entry price. The bot computes the final prices from the
+// live mark price at execution time, so the bracket is always a guaranteed distance
+// from the actual fill — no more band errors on tight-ATR candles.
+//
+// Entry signal: EMA crossover + RSI filter (reduces false signals on short timeframes)
+//   Long:  fast EMA crosses above slow EMA  AND  RSI < rsiMaxForLong  (not overbought)
+//   Short: fast EMA crosses below slow EMA  AND  RSI > rsiMinForShort (not oversold)
+//
+// Webhook payload: sends "tpPct" and "slPct" (always positive) instead of absolute prices.
+//   The bot applies them relative to the live markPrice at order execution:
+//     BUY  TP = markPrice × (1 + tpPct/100)     SL = markPrice × (1 − slPct/100)
+//     SELL TP = markPrice × (1 − tpPct/100)     SL = markPrice × (1 + slPct/100)
+//
+// Note: The TP/SL bands drawn on the chart use the bar's close price as reference
+// and are approximate visuals. The exact order prices are set by the bot at fill time.
+//
+// Date-range filter (backtesting only — keep OFF for live trading):
+//   When ON, entries only fire between Start and End date; any open position is
+//   flattened at the End date so the Strategy Tester reports cleanly.
+//
+// TradingView setup:
+//   1. Add to chart. Paste your WEBHOOK_SECRET into the "Webhook secret" field.
+//   2. Tune inputs: start with tpPct=1.5, slPct=0.75 on 1m–5m; wider on 15m.
+//      RSI filter defaults (max 60 for longs, min 40 for shorts) reduce noise.
+//   3. Run Strategy Tester to compare against ema-cross-tpsl before going live.
+//   4. Create an alert: condition "Any alert() function call", Message field empty.
+//   5. Set webhook URL: https://your-domain.com/webhook/<botId>
+//   ⚠️  Make sure "Use date filter" is OFF before activating the live alert.
+
+strategy(
+  title              = "EMA+RSI Bot (% TP/SL)",
+  overlay            = true,
+  calc_on_every_tick = false,
+  default_qty_type   = strategy.percent_of_equity,
+  default_qty_value  = 10
+)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+webhookSecret  = input.string("", "Webhook secret", confirm=true)
+fastLen        = input.int(9,    "Fast EMA",            minval=2)
+slowLen        = input.int(21,   "Slow EMA",            minval=5)
+rsiLen         = input.int(14,   "RSI length",          minval=2)
+rsiMaxForLong  = input.int(60,   "RSI max for long",    minval=1, maxval=100,
+                   tooltip="Only open longs when RSI is below this level — avoids buying into overbought conditions")
+rsiMinForShort = input.int(40,   "RSI min for short",   minval=1, maxval=100,
+                   tooltip="Only open shorts when RSI is above this level — avoids selling into oversold conditions")
+tpPct          = input.float(1.5, "TP %",  minval=0.1, step=0.1,
+                   tooltip="Take-profit as a percentage above/below entry. Bot applies to live markPrice at execution.")
+slPct          = input.float(0.75,"SL %",  minval=0.1, step=0.1,
+                   tooltip="Stop-loss as a percentage above/below entry. Bot applies to live markPrice at execution.")
+useTpSl        = input.bool(true, "Use TP/SL",
+                   tooltip="Set false to send plain entry alerts (no bracket) for A/B testing")
+
+// ── Date filter (backtesting only — leave OFF for live trading) ───────────────
+useDateFilter  = input.bool(false, "Use date filter", group="Date range (backtest only)",
+                   tooltip="OFF for live trading. ON to restrict the backtest window below.")
+startDate      = input.time(timestamp("2015-01-01 00:00 +0000"), "Start date", group="Date range (backtest only)")
+endDate        = input.time(timestamp("2023-12-31 23:59 +0000"), "End date",   group="Date range (backtest only)")
+
+inDateRange = not useDateFilter or (time >= startDate and time <= endDate)
+
+// ── Indicators ────────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+rsi     = ta.rsi(close, rsiLen)
+
+plot(emaFast, "Fast EMA", color=color.blue,   linewidth=1)
+plot(emaSlow, "Slow EMA", color=color.orange, linewidth=1)
+
+// ── Entry conditions ──────────────────────────────────────────────────────────
+longEntry  = ta.crossover(emaFast, emaSlow)  and rsi < rsiMaxForLong  and inDateRange
+shortEntry = ta.crossunder(emaFast, emaSlow) and rsi > rsiMinForShort and inDateRange
+
+// ── Approximate TP/SL levels for chart visualisation ─────────────────────────
+// These use close price as a proxy for markPrice (the bot will use the real fill).
+var float longSlViz  = na
+var float longTpViz  = na
+var float shortSlViz = na
+var float shortTpViz = na
+
+if longEntry
+    longSlViz  := close * (1 - slPct / 100)
+    longTpViz  := close * (1 + tpPct / 100)
+
+if shortEntry
+    shortSlViz := close * (1 + slPct / 100)
+    shortTpViz := close * (1 - tpPct / 100)
+
+// ── Orders ────────────────────────────────────────────────────────────────────
+if longEntry
+    strategy.close("Short", comment="Exit Short")
+    strategy.entry("Long",  strategy.long)
+    tpSlSuffix = useTpSl ? ',"tpPct":' + str.tostring(tpPct, "#.##") + ',"slPct":' + str.tostring(slPct, "#.##") : ''
+    alert('{"secret":"' + webhookSecret + '","webhookId":"' + syminfo.ticker + '-' + timeframe.period + '-' + str.tostring(time) + '-buy","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + tpSlSuffix + '}', alert.freq_once_per_bar_close)
+
+if shortEntry
+    strategy.close("Long",  comment="Exit Long")
+    strategy.entry("Short", strategy.short)
+    tpSlSuffix = useTpSl ? ',"tpPct":' + str.tostring(tpPct, "#.##") + ',"slPct":' + str.tostring(slPct, "#.##") : ''
+    alert('{"secret":"' + webhookSecret + '","webhookId":"' + syminfo.ticker + '-' + timeframe.period + '-' + str.tostring(time) + '-sell","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + tpSlSuffix + '}', alert.freq_once_per_bar_close)
+
+// ── Window close (backtest only) ──────────────────────────────────────────────
+if useDateFilter and time > endDate
+    strategy.cancel_all()
+    strategy.close_all(comment="Date window end")
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+plotshape(longEntry,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, title="Long signal")
+plotshape(shortEntry, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, title="Short signal")
+
+bgcolor(useDateFilter and inDateRange ? color.new(color.blue, 92) : na, title="Backtest window")
+
+// Approximate TP/SL bands (based on close; actual fill may differ slightly)
+plot(strategy.position_size > 0 ? longSlViz  : strategy.position_size < 0 ? shortSlViz : na, "SL (approx)", color=color.red,   style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size > 0 ? longTpViz  : strategy.position_size < 0 ? shortTpViz : na, "TP (approx)", color=color.green, style=plot.style_linebr, linewidth=1)

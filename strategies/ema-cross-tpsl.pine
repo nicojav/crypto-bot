@@ -80,13 +80,19 @@ if shortEntry
 if longEntry
     strategy.close("Short", comment="Exit Short")
     strategy.entry("Long",  strategy.long)
-    tpSlSuffix = useTpSl ? ',"takeProfit":' + str.tostring(longTp, "#.########") + ',"stopLoss":' + str.tostring(longSl, "#.########") : ''
+    // Send TP/SL as % of entry price so the bot applies them to the live mark price,
+    // avoiding Bybit's stale-price band errors (30208/10001).
+    longTpPct  = (longTp  - close) / close * 100
+    longSlPct  = (close   - longSl) / close * 100
+    tpSlSuffix = useTpSl ? ',"tpPct":' + str.tostring(longTpPct, "#.####") + ',"slPct":' + str.tostring(longSlPct, "#.####") : ''
     alert('{"secret":"' + webhookSecret + '","webhookId":"' + syminfo.ticker + '-' + timeframe.period + '-' + str.tostring(time) + '-buy","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.########") + tpSlSuffix + '}', alert.freq_once_per_bar_close)
 
 if shortEntry
     strategy.close("Long",  comment="Exit Long")
     strategy.entry("Short", strategy.short)
-    tpSlSuffix = useTpSl ? ',"takeProfit":' + str.tostring(shortTp, "#.########") + ',"stopLoss":' + str.tostring(shortSl, "#.########") : ''
+    shortTpPct = (close   - shortTp) / close * 100
+    shortSlPct = (shortSl - close)   / close * 100
+    tpSlSuffix = useTpSl ? ',"tpPct":' + str.tostring(shortTpPct, "#.####") + ',"slPct":' + str.tostring(shortSlPct, "#.####") : ''
     alert('{"secret":"' + webhookSecret + '","webhookId":"' + syminfo.ticker + '-' + timeframe.period + '-' + str.tostring(time) + '-sell","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.########") + tpSlSuffix + '}', alert.freq_once_per_bar_close)
 
 // ── Visuals ───────────────────────────────────────────────────────────────────
