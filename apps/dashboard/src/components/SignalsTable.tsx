@@ -73,6 +73,11 @@ export function SignalsTable() {
                     >
                       <td className="px-5 py-3 font-mono text-xs text-text-2 whitespace-nowrap">
                         {fmtTime.format(new Date(s.receivedAt))}
+                        {s.isTest && (
+                          <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber/10 text-amber border border-amber/20 align-middle">
+                            test
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-text-2">{s.symbol}</td>
                       <td className={`px-4 py-3 font-semibold text-xs ${ACTION_COLOR[s.action] ?? "text-text-2"}`}>

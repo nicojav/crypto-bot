@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { fetchBot, patchBot } from "../api/client";
+import { fetchBot, patchBot, testSignal } from "../api/client";
 import { Field } from "../components/ui/Field";
 import { Switch } from "../components/ui/Switch";
 import { friendlyReason } from "../utils/rejectionSummary";
@@ -48,6 +48,18 @@ export default function BotConfigPage() {
       return next;
     });
   }
+
+  const [simulateTpSlError, setSimulateTpSlError] = useState(false);
+
+  const sendTestSignal = useMutation({
+    mutationFn: (action: "BUY" | "SELL") => testSignal(botId, action, simulateTpSlError),
+    onSuccess: (data) => {
+      void qc.invalidateQueries({ queryKey: ["signals"] });
+      void qc.invalidateQueries({ queryKey: ["bot", botId] });
+      toast.success(`Signal #${data.signalId} queued — check the signals feed`);
+    },
+    onError: (err: Error) => { toast.error(err.message); },
+  });
 
   // Identity fields
   const [name, setName] = useState("");
@@ -254,6 +266,44 @@ export default function BotConfigPage() {
         </div>
       </section>
 
+      {/* Testing */}
+      <section className="bg-card border border-border rounded-[14px] overflow-hidden">
+        <div className="px-5 py-4 border-b border-border">
+          <h3 className="text-sm font-semibold text-text-1">Testing</h3>
+        </div>
+        <div className="px-5 py-4 flex flex-col gap-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <span className="text-sm text-text-2">Simulate TP/SL error</span>
+              <p className="text-xs text-text-3 mt-0.5">
+                Uses extreme TP/SL offsets to trigger Bybit's price-band check (30208/10001)
+                and verify the naked-entry fallback fires.
+                {bot.dryRun && (
+                  <span className="text-amber"> dryRun is ON — fallback won't fire (Bybit is not called in dryRun).</span>
+                )}
+              </p>
+            </div>
+            <Switch checked={simulateTpSlError} onChange={setSimulateTpSlError} colorOn="amber" />
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => sendTestSignal.mutate("BUY")}
+              disabled={sendTestSignal.isPending}
+              className="flex-1 py-2 rounded-xl bg-green/10 border border-green/30 text-green text-sm font-medium hover:bg-green/20 disabled:opacity-40 transition-colors"
+            >
+              Test BUY
+            </button>
+            <button
+              onClick={() => sendTestSignal.mutate("SELL")}
+              disabled={sendTestSignal.isPending}
+              className="flex-1 py-2 rounded-xl bg-red/10 border border-red/30 text-red text-sm font-medium hover:bg-red/20 disabled:opacity-40 transition-colors"
+            >
+              Test SELL
+            </button>
+          </div>
+        </div>
+      </section>
+
       {/* Risk limits + toggles */}
       <section className="bg-card border border-border rounded-[14px] overflow-hidden">
         <div className="px-5 py-4 border-b border-border">
@@ -316,6 +366,11 @@ export default function BotConfigPage() {
                       >
                         <td className="px-5 py-3 font-mono text-xs text-text-2 whitespace-nowrap">
                           {fmtTime.format(new Date(s.receivedAt))}
+                          {s.isTest && (
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber/10 text-amber border border-amber/20 align-middle">
+                              test
+                            </span>
+                          )}
                         </td>
                         <td className={`px-4 py-3 font-semibold text-xs ${ACTION_COLOR[s.action] ?? "text-text-2"}`}>
                           {s.action}

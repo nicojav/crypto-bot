@@ -79,6 +79,7 @@ export type Signal = {
   receivedAt: string;
   processedAt: string | null;
   rejectionReason: string | null;
+  isTest?: boolean;
 };
 
 export type BotDetail = Bot & {
@@ -128,6 +129,12 @@ export const patchBot = (
 ) => req<Bot>(`/api/bots/${id}`, { method: "PATCH", body: JSON.stringify(data) });
 
 export const fetchBot = (id: number) => req<BotDetail>(`/api/bots/${id}`);
+
+export const testSignal = (botId: number, action: "BUY" | "SELL", simulateTpSlError: boolean) =>
+  req<{ signalId: number; webhookId: string }>(
+    `/api/bots/${botId}/test-signal`,
+    { method: "POST", body: JSON.stringify({ action, simulateTpSlError }) },
+  );
 
 export const fetchTrades = (params?: { botId?: number; limit?: number; from?: string; to?: string }) => {
   const q = new URLSearchParams();

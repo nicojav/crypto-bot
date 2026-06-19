@@ -124,6 +124,7 @@ const signalItem = {
     receivedAt: { type: "string" },
     processedAt: { type: ["string", "null"] },
     rejectionReason: { type: ["string", "null"] },
+    isTest: { type: "boolean" },
   },
 } as const;
 
@@ -353,16 +354,20 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
       orderBy: { receivedAt: "desc" },
       take: limit,
     });
-    return signals.map((s) => ({
-      id: s.id,
-      botId: s.botId,
-      action: s.action,
-      symbol: s.bot.symbol,
-      status: s.status,
-      receivedAt: s.receivedAt.toISOString(),
-      processedAt: s.processedAt?.toISOString() ?? null,
-      rejectionReason: s.rejectionReason ?? null,
-    }));
+    return signals.map((s) => {
+      const parsedPayload = (() => { try { return JSON.parse(s.payload ?? "{}"); } catch { return {}; } })();
+      return {
+        id: s.id,
+        botId: s.botId,
+        action: s.action,
+        symbol: s.bot.symbol,
+        status: s.status,
+        receivedAt: s.receivedAt.toISOString(),
+        processedAt: s.processedAt?.toISOString() ?? null,
+        rejectionReason: s.rejectionReason ?? null,
+        isTest: parsedPayload?.meta?._test === true,
+      };
+    });
   });
 
   // GET /api/trades
@@ -718,4 +723,62 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
 
     return { orderId, symbol, side: closeSide, qty: pos.size };
   });
+
+  // POST /api/bots/:id/test-signal
+  // Inserts a PENDING Signal directly (bypasses webhook secret check).
+  // The SignalProcessor picks it up within 500ms exactly as a real TradingView alert.
+  // Use simulateTpSlError=true to place extreme TP/SL offsets that trigger Bybit's price-band
+  // check (30208/10001), verifying the naked-entry fallback works. No-op in dryRun mode
+  // (dryRun never calls Bybit, so the band error never fires).
+  fastify.post<{ Params: IdParams; Body: { action: "BUY" | "SELL"; simulateTpSlError?: boolean } }>(
+    "/api/bots/:id/test-signal",
+    {
+      schema: {
+        params: idParam,
+        body: {
+          type: "object",
+          required: ["action"],
+          additionalProperties: false,
+          properties: {
+            action:            { type: "string", enum: ["BUY", "SELL"] },
+            simulateTpSlError: { type: "boolean" },
+          },
+        },
+        response: {
+          201: {
+            type: "object",
+            properties: { signalId: { type: "integer" }, webhookId: { type: "string" } },
+            required: ["signalId", "webhookId"],
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params;
+      const { action, simulateTpSlError = false } = req.body;
+
+      const bot = await db.bot.findUnique({ where: { id } });
+      if (!bot) return reply.status(404).send({ error: "Not found" });
+
+      // refPrice=1.0 so the processor's re-anchoring (markPrice + (tp - ref)) produces
+      // tp = markPrice ± 1.0 — well outside Bybit's ~6% price band → triggers 30208/10001.
+      const refPrice = 1.0;
+      const payload: Record<string, unknown> = {
+        symbol: bot.symbol,
+        price: refPrice,
+        meta: { _test: true },  // surfaced as isTest in the dashboard
+      };
+      if (simulateTpSlError) {
+        payload.takeProfit = action === "BUY" ? refPrice + 1.0 : refPrice * 0.5;
+        payload.stopLoss   = action === "BUY" ? refPrice * 0.5 : refPrice + 1.0;
+      }
+
+      const webhookId = `test-${Date.now()}-${action.toLowerCase()}`;
+      const signal = await db.signal.create({
+        data: { botId: id, webhookId, action, payload: JSON.stringify(payload), status: "PENDING" },
+      });
+
+      return reply.status(201).send({ signalId: signal.id, webhookId });
+    },
+  );
 };
