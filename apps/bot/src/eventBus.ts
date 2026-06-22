@@ -6,6 +6,7 @@ export type BotEvent =
   | { type: "trade.opened"; data: { tradeId: number; botId: number; symbol: string; side: string; qty: number; entryPrice: number } }
   | { type: "trade.closed"; data: { tradeId: number; botId: number; symbol: string; pnlUsd: number | null } }
   | { type: "trade.liquidated"; data: { tradeId: number; botId: number; symbol: string; realizedPnlUsd: number; createType: string } }
+  | { type: "tpsl.failed"; data: { orderId: string; symbol: string; botId: number; reason: string } }
   | { type: "balance.updated"; data: { equityUsd: number; availableUsd: number } }
   | { type: "ws.reconnected"; data: { disconnectedMs: number } };
 

@@ -196,10 +196,9 @@ export class BybitClient {
     side: "Buy" | "Sell";
     qty: number;
     reduceOnly: boolean;
-    takeProfit?: number;
-    stopLoss?: number;
   }): Promise<string> {
-    // No retry on order placement — partial fills and duplicates are dangerous
+    // No retry on order placement — partial fills and duplicates are dangerous.
+    // TP/SL is set separately via setTradingStop after the position is confirmed.
     const res = await this.client.submitOrder({
       category: "linear",
       symbol: params.symbol,
@@ -207,11 +206,47 @@ export class BybitClient {
       orderType: "Market",
       qty: String(params.qty),
       reduceOnly: params.reduceOnly,
-      ...(params.takeProfit != null ? { takeProfit: String(params.takeProfit), tpslMode: "Full" } : {}),
-      ...(params.stopLoss != null ? { stopLoss: String(params.stopLoss), tpslMode: "Full" } : {}),
     });
     if (res.retCode !== 0) bybitError(res);
     return res.result.orderId;
+  }
+
+  /**
+   * Read the fill details of a completed order.
+   * For market (IOC) orders this is available as soon as submitOrder returns.
+   */
+  async getOrderFill(symbol: string, orderId: string): Promise<{ cumExecQty: number; avgPrice: number; status: string }> {
+    const res = await withRetry(() =>
+      this.client.getHistoricOrders({ category: "linear", symbol, orderId })
+    );
+    if (res.retCode !== 0) bybitError(res);
+    const order = res.result.list[0] as
+      | { cumExecQty: string; avgPrice: string; orderStatus: string }
+      | undefined;
+    if (!order) throw new Error(`Order not found: ${orderId}`);
+    return {
+      cumExecQty: Number(order.cumExecQty),
+      avgPrice: Number(order.avgPrice),
+      status: order.orderStatus,
+    };
+  }
+
+  /**
+   * Apply a full-position TP/SL bracket to an existing position via the
+   * position-level setTradingStop endpoint. This bypasses the tight price-band
+   * validation that applies to order-attached takeProfit/stopLoss params.
+   */
+  async setTradingStop(symbol: string, params: { takeProfit?: number; stopLoss?: number }): Promise<void> {
+    if (params.takeProfit == null && params.stopLoss == null) return;
+    const res = await this.client.setTradingStop({
+      category: "linear",
+      symbol,
+      positionIdx: 0, // one-way mode
+      tpslMode: "Full",
+      ...(params.takeProfit != null ? { takeProfit: String(params.takeProfit) } : {}),
+      ...(params.stopLoss != null ? { stopLoss: String(params.stopLoss) } : {}),
+    });
+    if (res.retCode !== 0) bybitError(res);
   }
 
   async getInstrumentInfo(symbol: string): Promise<InstrumentInfo> {

@@ -30,6 +30,8 @@ const MIGRATION_SQL = readdirSync(MIGRATIONS_DIR)
   .map((d) => readFileSync(resolve(MIGRATIONS_DIR, d, "migration.sql"), "utf8"))
   .join("\n");
 
+const DEFAULT_FILL = { cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" };
+
 function makeMockExchange(): Exchange & { [K in keyof Exchange]: ReturnType<typeof vi.fn> } {
   return {
     getMarkPrice: vi.fn(),
@@ -37,6 +39,8 @@ function makeMockExchange(): Exchange & { [K in keyof Exchange]: ReturnType<type
     getInstrumentInfo: vi.fn(),
     setLeverage: vi.fn(),
     placeMarketOrder: vi.fn(),
+    getOrderFill: vi.fn().mockResolvedValue(DEFAULT_FILL),
+    setTradingStop: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -180,6 +184,8 @@ describe("SignalProcessor", () => {
       qty: 0.01,
       reduceOnly: false,
     });
+    // No TP/SL in this signal → setTradingStop must not be called
+    expect(exchange.setTradingStop).not.toHaveBeenCalled();
   });
 
   it("CLOSE signal with no open position → REJECTED", async () => {
@@ -279,6 +285,7 @@ describe("SignalProcessor", () => {
     exchange.placeMarketOrder
       .mockResolvedValueOnce("order-close-123")
       .mockResolvedValueOnce("order-open-456");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([{ side: "Buy", size: 0.01 }]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -334,6 +341,7 @@ describe("SignalProcessor", () => {
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-open-789");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     // Exchange has Buy position (same side as incoming BUY signal) — divergence
     exchange.getPositions.mockResolvedValue([{ side: "Buy", size: 0.01 }]);
 
@@ -459,6 +467,7 @@ describe("SignalProcessor", () => {
     exchange.getMarkPrice.mockResolvedValue(50100);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-tp-sl");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50100, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -479,21 +488,31 @@ describe("SignalProcessor", () => {
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
     expect(updated.status).toBe("EXECUTED");
 
-    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+    // TP/SL goes via setTradingStop, NOT attached to the market order
+    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(
+      expect.not.objectContaining({ takeProfit: expect.anything() })
+    );
+    expect(exchange.setTradingStop).toHaveBeenCalledWith("BTCUSDT", {
       takeProfit: 51600, // 50100 + 1500 offset
       stopLoss: 48600,  // 50100 - 1500 offset
-    }));
+    });
+
+    const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
+    expect(trade?.takeProfitPrice).toBe(51600);
+    expect(trade?.stopLossPrice).toBe(48600);
+    expect(trade?.tpslSet).toBe(true);
   });
 
   it("BUY signal with extreme price drift → TP on wrong side after re-anchor, TP dropped, SL kept", async () => {
     // Bar closed at 50000, TP=50100 (very tight — 100 pts up), but live price surged to 50200.
     // After re-anchor: TP = 50200 + (50100-50000) = 50300 → valid (above markPrice).
-    // SL=49900 → re-anchored = 50200 + (49900-50000) = 50100 → ABOVE markPrice for a BUY → dropped.
+    // SL raw=49900, offset=-100, anchored=50200-100=50100 < markPrice → valid for BUY.
     const exchange = makeMockExchange();
     exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50200);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-partial-tpsl");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50200, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -512,16 +531,13 @@ describe("SignalProcessor", () => {
     await processor.processSignal(signal);
 
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
-    // Entry should still execute — invalid leg is dropped, not a hard reject
     expect(updated.status).toBe("EXECUTED");
 
-    // SL is dropped (re-anchored to 50100 which is below markPrice 50200... wait let me recalc)
-    // SL raw=49900, ref=50000. offset = 49900-50000 = -100. anchored = 50200 + (-100) = 50100.
-    // For BUY, sl valid if sl < markPrice (50200). 50100 < 50200 → valid. So both should survive.
-    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+    // TP/SL sent via setTradingStop, not the market order
+    expect(exchange.setTradingStop).toHaveBeenCalledWith("BTCUSDT", {
       takeProfit: 50300, // 50200 + 100
       stopLoss: 50100,   // 50200 - 100
-    }));
+    });
   });
 
   it("TP/SL tick-rounding: raw values with sub-tick decimals are rounded", async () => {
@@ -534,6 +550,7 @@ describe("SignalProcessor", () => {
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-ticked");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -551,10 +568,11 @@ describe("SignalProcessor", () => {
 
     await processor.processSignal(signal);
 
-    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+    // TP/SL goes via setTradingStop with tick-rounded values
+    expect(exchange.setTradingStop).toHaveBeenCalledWith("BTCUSDT", {
       takeProfit: 51500.5,
       stopLoss: 48499.5,
-    }));
+    });
   });
 
   // ── Percentage-based TP/SL (tpPct / slPct) ───────────────────────────────────
@@ -567,6 +585,7 @@ describe("SignalProcessor", () => {
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-pct-buy");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -585,10 +604,15 @@ describe("SignalProcessor", () => {
 
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
     expect(updated.status).toBe("EXECUTED");
-    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+    // TP/SL goes via setTradingStop
+    expect(exchange.setTradingStop).toHaveBeenCalledWith("BTCUSDT", {
       takeProfit: 50750, // 50000 × 1.015
       stopLoss: 49625,   // 50000 × 0.9925
-    }));
+    });
+    const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
+    expect(trade?.tpslSet).toBe(true);
+    expect(trade?.takeProfitPrice).toBe(50750);
+    expect(trade?.stopLossPrice).toBe(49625);
   });
 
   it("SELL with tpPct=1.5 slPct=0.75 → TP below mark, SL above mark", async () => {
@@ -599,6 +623,7 @@ describe("SignalProcessor", () => {
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-pct-sell");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -617,18 +642,19 @@ describe("SignalProcessor", () => {
 
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
     expect(updated.status).toBe("EXECUTED");
-    expect(exchange.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+    expect(exchange.setTradingStop).toHaveBeenCalledWith("BTCUSDT", {
       takeProfit: 49250, // 50000 × 0.985
       stopLoss: 50375,   // 50000 × 1.0075
-    }));
+    });
   });
 
-  it("tpPct only (no slPct) → TP set, SL undefined", async () => {
+  it("tpPct only (no slPct) → setTradingStop called with TP only, SL undefined", async () => {
     const exchange = makeMockExchange();
     exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-tp-only");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -645,9 +671,9 @@ describe("SignalProcessor", () => {
 
     await processor.processSignal(signal);
 
-    const call = exchange.placeMarketOrder.mock.calls[0][0] as Record<string, unknown>;
-    expect(call.takeProfit).toBe(51000); // 50000 × 1.02
-    expect(call.stopLoss).toBeUndefined();
+    const call = exchange.setTradingStop.mock.calls[0] as [string, { takeProfit?: number; stopLoss?: number }];
+    expect(call[1].takeProfit).toBe(51000); // 50000 × 1.02
+    expect(call[1].stopLoss).toBeUndefined();
   });
 
   it("tpPct takes priority over absolute takeProfit when both present", async () => {
@@ -657,6 +683,7 @@ describe("SignalProcessor", () => {
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.placeMarketOrder.mockResolvedValue("order-pct-priority");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
     exchange.getPositions.mockResolvedValue([]);
 
     const processor = new SignalProcessor(testDb, exchange);
@@ -674,20 +701,21 @@ describe("SignalProcessor", () => {
 
     await processor.processSignal(signal);
 
-    const call = exchange.placeMarketOrder.mock.calls[0][0] as Record<string, unknown>;
-    expect(call.takeProfit).toBe(51000); // pct wins: 50000 × 1.02 = 51000
+    const call = exchange.setTradingStop.mock.calls[0] as [string, { takeProfit?: number }];
+    expect(call[1].takeProfit).toBe(51000); // pct wins: 50000 × 1.02 = 51000
   });
 
-  it("TP/SL price-band rejection (30208) → retries naked, signal EXECUTED", async () => {
+  it("setTradingStop failure → Trade still created with tpslSet=false, signal EXECUTED", async () => {
+    // Entry order fills fine; setTradingStop fails (e.g. position not yet settled on testnet).
+    // We must NOT abort the trade — the position is real, just unprotected.
     const exchange = makeMockExchange();
     exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.getPositions.mockResolvedValue([]);
-    // First call (with TP/SL) throws 30208; second call (naked) succeeds
-    exchange.placeMarketOrder
-      .mockRejectedValueOnce(new Error("Bybit error 30208: Failed to submit order(s). The order price is higher than the maximum buying price."))
-      .mockResolvedValueOnce("order-retry-naked");
+    exchange.placeMarketOrder.mockResolvedValue("order-tpsl-failed");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0.01, avgPrice: 50000, status: "Cancelled" });
+    exchange.setTradingStop.mockRejectedValueOnce(new Error("Bybit error 10001: invalid tp/sl price"));
 
     const processor = new SignalProcessor(testDb, exchange);
 
@@ -696,7 +724,7 @@ describe("SignalProcessor", () => {
         botId,
         webhookId: `wh-${randomUUID()}`,
         action: "BUY",
-        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 50100, stopLoss: 49900 }),
+        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 50500, stopLoss: 49500 }),
         status: "PENDING",
       },
       include: { bot: true },
@@ -704,58 +732,47 @@ describe("SignalProcessor", () => {
 
     await processor.processSignal(signal);
 
-    // Signal should EXECUTE (not REJECT) because the naked retry succeeded
+    // Signal must EXECUTE — the position exists even without a bracket
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
     expect(updated.status).toBe("EXECUTED");
     expect(updated.rejectionReason).toBeNull();
 
-    // placeMarketOrder called twice: first with TP/SL, then without
-    expect(exchange.placeMarketOrder).toHaveBeenCalledTimes(2);
-    expect(exchange.placeMarketOrder).toHaveBeenNthCalledWith(1,
-      expect.objectContaining({ takeProfit: expect.any(Number), stopLoss: expect.any(Number) })
-    );
-    expect(exchange.placeMarketOrder).toHaveBeenNthCalledWith(2,
-      expect.objectContaining({ symbol: "BTCUSDT", side: "Buy", reduceOnly: false })
-    );
-    // Second call must NOT include TP/SL
-    const secondCall = exchange.placeMarketOrder.mock.calls[1][0] as Record<string, unknown>;
-    expect(secondCall.takeProfit).toBeUndefined();
-    expect(secondCall.stopLoss).toBeUndefined();
+    // placeMarketOrder called once only — no retry, no TP/SL on the order
+    expect(exchange.placeMarketOrder).toHaveBeenCalledTimes(1);
 
-    // Trade should be created
+    // Trade created with tpslSet=false (bracket not applied)
     const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
     expect(trade).not.toBeNull();
-    expect(trade?.exchangeOrderId).toBe("order-retry-naked");
+    expect(trade?.tpslSet).toBe(false);
+    expect(trade?.takeProfitPrice).toBe(50500); // intent recorded even though not applied
+    expect(trade?.stopLossPrice).toBe(49500);
   });
 
-  it("TP/SL 10001 bracket-range rejection → retries naked, signal EXECUTED", async () => {
+  it("0-fill entry order → signal REJECTED, no Trade created", async () => {
+    // Market order submitted but fills 0 (testnet thin book, or race condition).
     const exchange = makeMockExchange();
     exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
     exchange.setLeverage.mockResolvedValue(undefined);
     exchange.getPositions.mockResolvedValue([]);
-    exchange.placeMarketOrder
-      .mockRejectedValueOnce(new Error("Bybit error 10001: [abc-123]sell: [645570000,657840000] invalid"))
-      .mockResolvedValueOnce("order-retry-10001");
+    exchange.placeMarketOrder.mockResolvedValue("order-zero-fill");
+    exchange.getOrderFill.mockResolvedValue({ cumExecQty: 0, avgPrice: 0, status: "Cancelled" });
 
     const processor = new SignalProcessor(testDb, exchange);
-
-    const signal = await testDb.signal.create({
-      data: {
-        botId,
-        webhookId: `wh-${randomUUID()}`,
-        action: "SELL",
-        payload: JSON.stringify({ symbol: "BTCUSDT", price: 50000, takeProfit: 49900, stopLoss: 50100 }),
-        status: "PENDING",
-      },
-      include: { bot: true },
-    });
+    const signal = await createPendingSignal("BUY");
 
     await processor.processSignal(signal);
 
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
-    expect(updated.status).toBe("EXECUTED");
-    expect(exchange.placeMarketOrder).toHaveBeenCalledTimes(2);
+    expect(updated.status).toBe("REJECTED");
+    expect(updated.rejectionReason).toMatch(/filled 0/);
+
+    // No Trade row must exist
+    const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
+    expect(trade).toBeNull();
+
+    // setTradingStop must not have been called
+    expect(exchange.setTradingStop).not.toHaveBeenCalled();
   });
 
   it("non-TP/SL exchange error is NOT retried → signal REJECTED", async () => {

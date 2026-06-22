@@ -15,6 +15,7 @@ interface WsOrderUpdate {
   symbol: string;
   side: string;       // "Buy" | "Sell"
   qty: string;
+  cumExecQty: string; // actual filled qty (may be < qty for IOC partial fills)
   orderStatus: string;
   avgPrice: string;
   cumExecFee: string;
@@ -454,7 +455,8 @@ export class Reconciler {
   }
 
   private async hydrateOpenTradeFill(order: WsOrderUpdate): Promise<void> {
-    // Non-reduce-only fill → hydrate entryFillPrice + feeOpenUsd on the matching open trade
+    // Non-reduce-only fill → hydrate entry fields on the matching open trade.
+    // Also sync qty to cumExecQty so downstream PnL calculations use the real fill size.
     const entryFillPrice = Number(order.avgPrice);
     if (!entryFillPrice) return;
 
@@ -463,15 +465,17 @@ export class Reconciler {
     });
     if (!trade) return;
 
+    const cumExecQty = Number(order.cumExecQty);
     await this.db.trade.update({
       where: { id: trade.id },
       data: {
         entryFillPrice,
         feeOpenUsd: Number(order.cumExecFee),
-        entryPrice: entryFillPrice, // keep entryPrice in sync with actual fill
+        entryPrice: entryFillPrice,    // keep entryPrice in sync with actual fill
+        ...(cumExecQty > 0 ? { qty: cumExecQty } : {}), // reconcile qty to actual fill
       },
     });
-    console.log(`[reconciler] open fill: hydrated trade #${trade.id} entryFillPrice=${entryFillPrice}`);
+    console.log(`[reconciler] open fill: hydrated trade #${trade.id} entryFillPrice=${entryFillPrice} qty=${cumExecQty > 0 ? cumExecQty : trade.qty}`);
   }
 
   async runReconciliation(reason: string): Promise<void> {

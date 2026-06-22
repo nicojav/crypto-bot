@@ -63,6 +63,9 @@ const tradeItem = {
     feeOpenUsd: { type: ["number", "null"] },
     feeCloseUsd: { type: ["number", "null"] },
     pnlSource: { type: ["string", "null"] },
+    takeProfitPrice: { type: ["number", "null"] },
+    stopLossPrice: { type: ["number", "null"] },
+    tpslSet: { type: "boolean" },
     status: { type: "string" },
     openedAt: { type: "string" },
     closedAt: { type: ["string", "null"] },
@@ -642,13 +645,26 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
                 required: ["tradeId", "symbol", "side", "status"],
               },
             },
+            qtyMismatches: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  tradeId: { type: "integer" },
+                  symbol: { type: "string" },
+                  dbQty: { type: "number" },
+                  exchangeQty: { type: "number" },
+                },
+                required: ["tradeId", "symbol", "dbQty", "exchangeQty"],
+              },
+            },
           },
-          required: ["orphanedOnExchange", "orphanedInDb"],
+          required: ["orphanedOnExchange", "orphanedInDb", "qtyMismatches"],
         },
       },
     },
   }, async () => {
-    if (!bybit) return { orphanedOnExchange: [], orphanedInDb: [] };
+    if (!bybit) return { orphanedOnExchange: [], orphanedInDb: [], qtyMismatches: [] };
 
     const [livePositions, dbTrades] = await Promise.all([
       bybit.getAllPositions(),
@@ -669,6 +685,16 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
       )
     );
 
+    // Matched symbol+side but qty diverges by more than 1%
+    const qtyMismatches = livePositions.flatMap((p) => {
+      const matched = dbTrades.filter(
+        (t) => t.symbol === p.symbol && t.side === (p.side === "Buy" ? "BUY" : "SELL")
+      );
+      return matched
+        .filter((t) => Math.abs(t.qty - p.size) / Math.max(t.qty, p.size) > 0.01)
+        .map((t) => ({ tradeId: t.id, symbol: t.symbol, dbQty: t.qty, exchangeQty: p.size }));
+    });
+
     return {
       orphanedOnExchange: orphanedOnExchange.map((p) => ({
         symbol: p.symbol,
@@ -682,6 +708,7 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
         side: t.side,
         status: t.status,
       })),
+      qtyMismatches,
     };
   });
 

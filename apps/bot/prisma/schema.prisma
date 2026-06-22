@@ -62,6 +62,11 @@ model Trade {
   pnlSource        String?   // BYBIT_WS | EXEC_FALLBACK | BYBIT_LIQUIDATION
   closingOrderId   String?
 
+  // TP/SL bracket — computed at entry time, sent via setTradingStop after order fills
+  takeProfitPrice  Float?    // absolute TP price sent to exchange
+  stopLossPrice    Float?    // absolute SL price sent to exchange
+  tpslSet          Boolean   @default(false) // true if setTradingStop confirmed on Bybit
+
   bot              Bot       @relation(fields: [botId], references: [id])
   signal           Signal    @relation(fields: [signalId], references: [id])
 

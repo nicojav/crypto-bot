@@ -9,7 +9,11 @@ export interface Exchange {
   getPositions(symbol: string): Promise<Array<{ side: "Buy" | "Sell" | "None"; size: number }>>;
   getInstrumentInfo(symbol: string): Promise<{ lotSize: number; minQty: number; tickSize: number }>;
   setLeverage(symbol: string, leverage: number): Promise<void>;
-  placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean; takeProfit?: number; stopLoss?: number }): Promise<string>;
+  placeMarketOrder(params: { symbol: string; side: "Buy" | "Sell"; qty: number; reduceOnly: boolean }): Promise<string>;
+  /** Read the fill result of a just-placed order (cumExecQty = actual position size opened). */
+  getOrderFill(symbol: string, orderId: string): Promise<{ cumExecQty: number; avgPrice: number; status: string }>;
+  /** Set position-level TP/SL after the position is confirmed; looser price-band validation than order-attached bracket. */
+  setTradingStop(symbol: string, params: { takeProfit?: number; stopLoss?: number }): Promise<void>;
 }
 
 function decimalsOf(step: number): number {
@@ -335,20 +339,36 @@ export class SignalProcessor {
       }
     }
 
-    // Place the entry order. If Bybit rejects the TP/SL on price-constraint grounds
-    // (too close to market, outside price band, etc.), retry without the bracket so the
-    // entry still opens — position will exit on the next EMA cross instead.
-    let orderId: string;
-    try {
-      orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false, takeProfit, stopLoss });
-    } catch (err) {
-      const msg = (err as Error).message ?? "";
-      const isTPSLPriceError = /30208|30209|10001/.test(msg);
-      if ((takeProfit != null || stopLoss != null) && isTPSLPriceError) {
-        console.warn(`[processor] TP/SL rejected by Bybit (${msg.slice(0, 100)}) — retrying entry without TP/SL`);
-        orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
-      } else {
-        throw err;
+    // Place the entry order — no TP/SL attached to the order itself.
+    // TP/SL is applied via setTradingStop after we confirm the position exists,
+    // which uses looser price-band validation and is idempotent.
+    const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
+
+    // Market orders on Bybit are IOC: they fill what's available and cancel the rest.
+    // Read the actual cumExecQty so we record what was truly opened.
+    const fill = await this.exchange.getOrderFill(symbol, orderId);
+    const filledQty = fill.cumExecQty;
+
+    if (filledQty === 0) {
+      // Fully unfilled — common on testnet with thin books; should not occur on mainnet.
+      await this.reject(signal.id, `Order ${orderId} filled 0 of ${qty} (${fill.status}) — no position opened`, bot.id);
+      return;
+    }
+
+    const actualEntryPrice = fill.avgPrice > 0 ? fill.avgPrice : markPrice;
+
+    // Set position-level TP/SL bracket. On failure we log prominently and publish an
+    // event but do NOT abort — the trade exists and must be recorded.
+    let tpslSet = false;
+    if (takeProfit != null || stopLoss != null) {
+      try {
+        await this.exchange.setTradingStop(symbol, { takeProfit, stopLoss });
+        tpslSet = true;
+        console.log(`[processor] TP/SL set: ${symbol} TP=${takeProfit ?? "—"} SL=${stopLoss ?? "—"}`);
+      } catch (tpslErr) {
+        const msg = (tpslErr as Error).message;
+        console.error(`[processor] WARN: setTradingStop failed for ${symbol} (${msg}) — position has no bracket`);
+        this.bus?.publish({ type: "tpsl.failed", data: { orderId, symbol, botId: bot.id, reason: msg } });
       }
     }
 
@@ -364,14 +384,17 @@ export class SignalProcessor {
           exchangeOrderId: orderId,
           symbol,
           side: signal.action,
-          qty,
-          entryPrice: markPrice,
+          qty: filledQty,
+          entryPrice: actualEntryPrice,
+          takeProfitPrice: takeProfit ?? null,
+          stopLossPrice: stopLoss ?? null,
+          tpslSet,
           status: "OPEN",
         },
       }),
     ]);
-    this.bus?.publish({ type: "trade.opened", data: { tradeId: liveTrade.id, botId: bot.id, symbol, side: signal.action, qty, entryPrice: markPrice } });
-    console.log(`[processor] ${signal.action} ${qty} ${symbol} @ ~${markPrice} orderId=${orderId}`);
+    this.bus?.publish({ type: "trade.opened", data: { tradeId: liveTrade.id, botId: bot.id, symbol, side: signal.action, qty: filledQty, entryPrice: actualEntryPrice } });
+    console.log(`[processor] ${signal.action} filled=${filledQty}/${qty} ${symbol} @ ~${actualEntryPrice} orderId=${orderId} tpslSet=${tpslSet}`);
   }
 
   private async reject(signalId: number, reason: string, botId?: number): Promise<void> {
