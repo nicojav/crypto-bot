@@ -10,6 +10,7 @@
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
     "check-bybit": "tsx ../../scripts/check-bybit.ts",
+    "check-tpsl": "tsx ../../scripts/check-tpsl.ts",
     "reset-trade-data": "tsx ../../scripts/reset-trade-data.ts",
     "diagnose-divergence": "tsx ../../scripts/diagnose-divergence.ts",
     "backfill:pnl": "tsx src/scripts/backfillRealizedPnl.ts",
