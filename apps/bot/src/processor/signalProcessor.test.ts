@@ -748,8 +748,37 @@ describe("SignalProcessor", () => {
     expect(trade?.stopLossPrice).toBe(49500);
   });
 
-  it("0-fill entry order → signal REJECTED, no Trade created", async () => {
-    // Market order submitted but fills 0 (testnet thin book, or race condition).
+  it("getOrderFill throws → signal EXECUTED, Trade still created with requested qty (reconciler repairs)", async () => {
+    // Simulates the timing race: order filled on Bybit but getOrderFill can't read it yet.
+    // The Trade must still be created so the position is not orphaned.
+    const exchange = makeMockExchange();
+    exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
+    exchange.getMarkPrice.mockResolvedValue(50000);
+    exchange.setLeverage.mockResolvedValue(undefined);
+    exchange.getPositions.mockResolvedValue([]);
+    exchange.placeMarketOrder.mockResolvedValue("order-fill-error");
+    exchange.getOrderFill.mockRejectedValue(new Error("Order not found after 4 attempts: order-fill-error"));
+
+    const processor = new SignalProcessor(testDb, exchange);
+    const signal = await createPendingSignal("BUY");
+
+    await processor.processSignal(signal);
+
+    // Signal is EXECUTED — the order reached the exchange
+    const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
+    expect(updated.status).toBe("EXECUTED");
+
+    // Trade exists with the requested qty (reconciler will correct it later)
+    const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
+    expect(trade).not.toBeNull();
+    expect(trade?.status).toBe("OPEN");
+    expect(trade?.qty).toBe(0.01); // requested qty, not fill qty
+    expect(trade?.exchangeOrderId).toBe("order-fill-error");
+  });
+
+  it("0-fill entry order → signal EXECUTED, Trade created then immediately closed as PHANTOM", async () => {
+    // Market order placed and registered but fills 0 (testnet thin book).
+    // The order DID reach the exchange so signal is EXECUTED; Trade is closed as PHANTOM.
     const exchange = makeMockExchange();
     exchange.getInstrumentInfo.mockResolvedValue({ lotSize: 0.001, minQty: 0.001, tickSize: 1 });
     exchange.getMarkPrice.mockResolvedValue(50000);
@@ -763,15 +792,18 @@ describe("SignalProcessor", () => {
 
     await processor.processSignal(signal);
 
+    // Signal is EXECUTED — the order reached the exchange
     const updated = await testDb.signal.findUniqueOrThrow({ where: { id: signal.id } });
-    expect(updated.status).toBe("REJECTED");
-    expect(updated.rejectionReason).toMatch(/filled 0/);
+    expect(updated.status).toBe("EXECUTED");
 
-    // No Trade row must exist
+    // Trade is created then immediately closed as PHANTOM (0 fill = no real position)
     const trade = await testDb.trade.findFirst({ where: { signalId: signal.id } });
-    expect(trade).toBeNull();
+    expect(trade).not.toBeNull();
+    expect(trade?.status).toBe("CLOSED");
+    expect(trade?.pnlSource).toBe("PHANTOM");
+    expect(trade?.pnlUsd).toBe(0);
 
-    // setTradingStop must not have been called
+    // setTradingStop must not be called (no position to protect)
     expect(exchange.setTradingStop).not.toHaveBeenCalled();
   });
 

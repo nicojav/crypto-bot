@@ -340,38 +340,12 @@ export class SignalProcessor {
     }
 
     // Place the entry order — no TP/SL attached to the order itself.
-    // TP/SL is applied via setTradingStop after we confirm the position exists,
-    // which uses looser price-band validation and is idempotent.
+    // TP/SL is applied via setTradingStop after the position is confirmed.
     const orderId = await this.exchange.placeMarketOrder({ symbol, side, qty, reduceOnly: false });
 
-    // Market orders on Bybit are IOC: they fill what's available and cancel the rest.
-    // Read the actual cumExecQty so we record what was truly opened.
-    const fill = await this.exchange.getOrderFill(symbol, orderId);
-    const filledQty = fill.cumExecQty;
-
-    if (filledQty === 0) {
-      // Fully unfilled — common on testnet with thin books; should not occur on mainnet.
-      await this.reject(signal.id, `Order ${orderId} filled 0 of ${qty} (${fill.status}) — no position opened`, bot.id);
-      return;
-    }
-
-    const actualEntryPrice = fill.avgPrice > 0 ? fill.avgPrice : markPrice;
-
-    // Set position-level TP/SL bracket. On failure we log prominently and publish an
-    // event but do NOT abort — the trade exists and must be recorded.
-    let tpslSet = false;
-    if (takeProfit != null || stopLoss != null) {
-      try {
-        await this.exchange.setTradingStop(symbol, { takeProfit, stopLoss });
-        tpslSet = true;
-        console.log(`[processor] TP/SL set: ${symbol} TP=${takeProfit ?? "—"} SL=${stopLoss ?? "—"}`);
-      } catch (tpslErr) {
-        const msg = (tpslErr as Error).message;
-        console.error(`[processor] WARN: setTradingStop failed for ${symbol} (${msg}) — position has no bracket`);
-        this.bus?.publish({ type: "tpsl.failed", data: { orderId, symbol, botId: bot.id, reason: msg } });
-      }
-    }
-
+    // Record the Trade IMMEDIATELY — before any enrichment API calls.
+    // This ensures no placed order is ever orphaned (no DB record), even if
+    // getOrderFill or setTradingStop throw. Reconciler repairs qty/entry later.
     const [, liveTrade] = await this.db.$transaction([
       this.db.signal.update({
         where: { id: signal.id },
@@ -384,17 +358,54 @@ export class SignalProcessor {
           exchangeOrderId: orderId,
           symbol,
           side: signal.action,
-          qty: filledQty,
-          entryPrice: actualEntryPrice,
+          qty,               // requested qty — corrected below if getOrderFill succeeds
+          entryPrice: markPrice,
           takeProfitPrice: takeProfit ?? null,
           stopLossPrice: stopLoss ?? null,
-          tpslSet,
+          tpslSet: false,
           status: "OPEN",
         },
       }),
     ]);
-    this.bus?.publish({ type: "trade.opened", data: { tradeId: liveTrade.id, botId: bot.id, symbol, side: signal.action, qty: filledQty, entryPrice: actualEntryPrice } });
-    console.log(`[processor] ${signal.action} filled=${filledQty}/${qty} ${symbol} @ ~${actualEntryPrice} orderId=${orderId} tpslSet=${tpslSet}`);
+    this.bus?.publish({ type: "trade.opened", data: { tradeId: liveTrade.id, botId: bot.id, symbol, side: signal.action, qty, entryPrice: markPrice } });
+    console.log(`[processor] ${signal.action} ${qty} ${symbol} @ ~${markPrice} orderId=${orderId}`);
+
+    // Best-effort: read actual fill and correct qty + entryPrice.
+    // IOC market orders may partially fill; status will be Cancelled in that case.
+    // On throw (e.g. transient API lag), the reconciler's WS/REST fallback repairs the row.
+    try {
+      const fill = await this.exchange.getOrderFill(symbol, orderId);
+      if (fill.cumExecQty === 0) {
+        // Nothing filled — close the trade row immediately so it doesn't show as OPEN.
+        await this.db.trade.update({
+          where: { id: liveTrade.id },
+          data: { status: "CLOSED", pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM", closedAt: new Date() },
+        });
+        console.warn(`[processor] ${signal.action} ${symbol}: order ${orderId} filled 0 — trade #${liveTrade.id} closed as PHANTOM`);
+      } else {
+        const actualEntryPrice = fill.avgPrice > 0 ? fill.avgPrice : markPrice;
+        await this.db.trade.update({
+          where: { id: liveTrade.id },
+          data: { qty: fill.cumExecQty, entryPrice: actualEntryPrice },
+        });
+        console.log(`[processor] fill: trade #${liveTrade.id} qty=${fill.cumExecQty}/${qty} entry=${actualEntryPrice}`);
+      }
+    } catch (fillErr) {
+      console.warn(`[processor] getOrderFill for ${orderId} failed (${(fillErr as Error).message}) — reconciler will repair qty/entry`);
+    }
+
+    // Best-effort: apply TP/SL bracket. On failure, log + event but do NOT abort.
+    if (takeProfit != null || stopLoss != null) {
+      try {
+        await this.exchange.setTradingStop(symbol, { takeProfit, stopLoss });
+        await this.db.trade.update({ where: { id: liveTrade.id }, data: { tpslSet: true } });
+        console.log(`[processor] TP/SL set: ${symbol} TP=${takeProfit ?? "—"} SL=${stopLoss ?? "—"}`);
+      } catch (tpslErr) {
+        const msg = (tpslErr as Error).message;
+        console.error(`[processor] WARN: setTradingStop failed for ${symbol} (${msg}) — position has no bracket`);
+        this.bus?.publish({ type: "tpsl.failed", data: { orderId, symbol, botId: bot.id, reason: msg } });
+      }
+    }
   }
 
   private async reject(signalId: number, reason: string, botId?: number): Promise<void> {

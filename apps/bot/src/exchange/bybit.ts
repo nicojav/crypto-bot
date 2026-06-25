@@ -212,23 +212,33 @@ export class BybitClient {
   }
 
   /**
-   * Read the fill details of a completed order.
-   * For market (IOC) orders this is available as soon as submitOrder returns.
+   * Read the fill details of a just-placed order via the realtime endpoint.
+   * getActiveOrders sees orders immediately; getHistoricOrders has a write-behind lag
+   * that caused "Order not found" errors right after submitOrder returned.
+   * Retries briefly because the order may not register on the first tick after placement.
    */
   async getOrderFill(symbol: string, orderId: string): Promise<{ cumExecQty: number; avgPrice: number; status: string }> {
-    const res = await withRetry(() =>
-      this.client.getHistoricOrders({ category: "linear", symbol, orderId })
-    );
-    if (res.retCode !== 0) bybitError(res);
-    const order = res.result.list[0] as
-      | { cumExecQty: string; avgPrice: string; orderStatus: string }
-      | undefined;
-    if (!order) throw new Error(`Order not found: ${orderId}`);
-    return {
-      cumExecQty: Number(order.cumExecQty),
-      avgPrice: Number(order.avgPrice),
-      status: order.orderStatus,
-    };
+    const ATTEMPTS = 4;
+    const DELAY_MS = 250;
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
+      const res = await withRetry(() =>
+        this.client.getActiveOrders({ category: "linear", symbol, orderId })
+      );
+      if (res.retCode !== 0) bybitError(res);
+      const order = res.result.list[0] as
+        | { cumExecQty: string; avgPrice: string; orderStatus: string }
+        | undefined;
+      if (order) {
+        return {
+          cumExecQty: Number(order.cumExecQty),
+          avgPrice: Number(order.avgPrice),
+          status: order.orderStatus,
+        };
+      }
+      console.warn(`[bybit] getOrderFill: ${orderId} not yet visible (attempt ${attempt + 1}/${ATTEMPTS})`);
+    }
+    throw new Error(`Order not found after ${ATTEMPTS} attempts: ${orderId}`);
   }
 
   /**

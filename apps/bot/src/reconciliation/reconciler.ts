@@ -179,10 +179,19 @@ export class Reconciler {
     if (event.topic === "order") {
       const orders = event.data as WsOrderUpdate[];
       for (const order of orders) {
-        if (order.orderStatus !== "Filled") continue;
-        if (order.reduceOnly) {
-          await this.closeTradesByOrderFill(order);
-        } else {
+        const filled = Number(order.cumExecQty) > 0;
+        if (!filled) continue;
+        if (order.orderStatus === "Filled") {
+          // Fully filled: handle entries and reduce-only closes
+          if (order.reduceOnly) {
+            await this.closeTradesByOrderFill(order);
+          } else {
+            await this.hydrateOpenTradeFill(order);
+          }
+        } else if (!order.reduceOnly) {
+          // Partially filled IOC entry (status=Cancelled / PartiallyFilledCanceled):
+          // hydrate qty/price — we only handle entries here since partial reduce-only
+          // closes leave a remaining position that requires reconciler-level handling.
           await this.hydrateOpenTradeFill(order);
         }
       }

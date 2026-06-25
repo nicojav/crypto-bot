@@ -135,6 +135,7 @@ function makeOrderEvent(overrides: Partial<{
   symbol: string;
   side: string;
   qty: string;
+  cumExecQty: string;
   avgPrice: string;
   cumExecFee: string;
   closedPnl: string;
@@ -142,11 +143,13 @@ function makeOrderEvent(overrides: Partial<{
   orderStatus: string;
   createType: string;
 }> = {}) {
+  const qty = overrides.qty ?? "100";
   return {
     orderId: overrides.orderId ?? "close-ord-1",
     symbol: overrides.symbol ?? "XRPUSDT",
     side: overrides.side ?? "Buy",     // Bybit side for the closing order (Buy closes a Short/SELL trade)
-    qty: overrides.qty ?? "100",
+    qty,
+    cumExecQty: overrides.cumExecQty ?? qty, // default: fully filled
     orderStatus: overrides.orderStatus ?? "Filled",
     avgPrice: overrides.avgPrice ?? "2.90",
     cumExecFee: overrides.cumExecFee ?? "0.15",
