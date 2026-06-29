@@ -15,7 +15,8 @@
     "diagnose-divergence": "tsx ../../scripts/diagnose-divergence.ts",
     "backfill:pnl": "tsx src/scripts/backfillRealizedPnl.ts",
     "mark-phantoms": "tsx src/scripts/markPhantomTrades.ts",
-    "backfill:pnl-grouped": "tsx src/scripts/backfillRealizedPnlGrouped.ts"
+    "backfill:pnl-grouped": "tsx src/scripts/backfillRealizedPnlGrouped.ts",
+    "repair:history": "tsx src/scripts/repairHistory.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
