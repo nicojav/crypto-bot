@@ -534,10 +534,10 @@ describe("GET /api/equity/summary", () => {
     const sig1 = await testDb.signal.create({ data: { botId, webhookId: "wh-sum-1", action: "BUY", payload: "{}", status: "EXECUTED" } });
     const sig2 = await testDb.signal.create({ data: { botId, webhookId: "wh-sum-2", action: "BUY", payload: "{}", status: "EXECUTED" } });
     await testDb.trade.create({
-      data: { botId, signalId: sig1.id, exchangeOrderId: "ord-sum-1", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 50, feeOpenUsd: 0.10, feeCloseUsd: 0.15, closedAt },
+      data: { botId, signalId: sig1.id, exchangeOrderId: "ord-sum-1", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 50, feeOpenUsd: 0.10, feeCloseUsd: 0.15, pnlSource: "BYBIT_WS", closedAt },
     });
     await testDb.trade.create({
-      data: { botId, signalId: sig2.id, exchangeOrderId: "ord-sum-2", symbol: "XRPUSDT", side: "SELL", qty: 50, entryPrice: 3.10, status: "CLOSED", realizedPnlUsd: 30, feeOpenUsd: 0.08, feeCloseUsd: 0.12, closedAt },
+      data: { botId, signalId: sig2.id, exchangeOrderId: "ord-sum-2", symbol: "XRPUSDT", side: "SELL", qty: 50, entryPrice: 3.10, status: "CLOSED", realizedPnlUsd: 30, feeOpenUsd: 0.08, feeCloseUsd: 0.12, pnlSource: "BYBIT_WS", closedAt },
     });
 
     const from = new Date(Date.now() - 60_000).toISOString();
@@ -550,11 +550,13 @@ describe("GET /api/equity/summary", () => {
     expect(body.tradeCount).toBe(2);
   });
 
-  it("falls back to pnlUsd when realizedPnlUsd is null", async () => {
+  it("falls back to pnlUsd when realizedPnlUsd is null (trusted source)", async () => {
+    // When a trusted source is recorded but realizedPnlUsd hasn't been written yet,
+    // the summary should still use the legacy pnlUsd column.
     const closedAt = new Date();
     const sig = await testDb.signal.create({ data: { botId, webhookId: "wh-fallback-pnl", action: "BUY", payload: "{}", status: "EXECUTED" } });
     await testDb.trade.create({
-      data: { botId, signalId: sig.id, exchangeOrderId: "ord-fallback", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", pnlUsd: 42, realizedPnlUsd: null, closedAt },
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-fallback", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", pnlUsd: 42, realizedPnlUsd: null, pnlSource: "BYBIT_WS", closedAt },
     });
 
     const from = new Date(Date.now() - 60_000).toISOString();
@@ -574,7 +576,7 @@ describe("GET /api/equity/summary", () => {
     const sig = await testDb.signal.create({ data: { botId, webhookId: "wh-residual", action: "BUY", payload: "{}", status: "EXECUTED" } });
     // Realized = 180, fees = 10 → net = 170; residual = 200 - 170 = 30
     await testDb.trade.create({
-      data: { botId, signalId: sig.id, exchangeOrderId: "ord-residual", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 180, feeOpenUsd: 5, feeCloseUsd: 5, closedAt },
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-residual", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 180, feeOpenUsd: 5, feeCloseUsd: 5, pnlSource: "BYBIT_WS", closedAt },
     });
 
     const from = new Date(Date.now() - 60_000).toISOString();
@@ -625,7 +627,7 @@ describe("GET /api/equity/summary", () => {
     const closedAt = new Date();
     const sig = await testDb.signal.create({ data: { botId, webhookId: "wh-funding-residual", action: "BUY", payload: "{}", status: "EXECUTED" } });
     await testDb.trade.create({
-      data: { botId, signalId: sig.id, exchangeOrderId: "ord-fr", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 180, feeOpenUsd: 5, feeCloseUsd: 5, closedAt },
+      data: { botId, signalId: sig.id, exchangeOrderId: "ord-fr", symbol: "XRPUSDT", side: "BUY", qty: 100, entryPrice: 3, status: "CLOSED", realizedPnlUsd: 180, feeOpenUsd: 5, feeCloseUsd: 5, pnlSource: "BYBIT_WS", closedAt },
     });
 
     // Funding: -15 paid out

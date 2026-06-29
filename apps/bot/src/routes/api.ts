@@ -3,6 +3,10 @@ import type { PrismaClient } from "../generated/prisma/client.js";
 import type { BybitClient } from "../exchange/bybit.js";
 import { env } from "../env.js";
 
+// PnL sources that are authoritative (from Bybit) — exclude local estimates and unresolved rows.
+// EXEC_FALLBACK is a local formula (unreliable); null-source rows have never been attributed.
+const TRUSTED_PNL_SOURCES = new Set(["BYBIT_WS", "BYBIT_REST", "BYBIT_REST_GROUPED", "BYBIT_LIQUIDATION", "PHANTOM"]);
+
 // ── Shared schemas ────────────────────────────────────────────────────────────
 
 const idParam = {
@@ -399,8 +403,9 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
     });
     return trades.map((t) => ({
       ...t,
-      // Use real Bybit PnL when available; fall back to legacy local estimate
-      pnlUsd: t.realizedPnlUsd ?? t.pnlUsd ?? null,
+      // Only expose Bybit-authoritative PnL; local estimates (EXEC_FALLBACK, null source)
+      // are excluded to prevent inflated figures from surfacing in the trades table.
+      pnlUsd: TRUSTED_PNL_SOURCES.has(t.pnlSource ?? "") ? (t.realizedPnlUsd ?? t.pnlUsd) : null,
       openedAt: t.openedAt.toISOString(),
       closedAt: t.closedAt?.toISOString() ?? null,
     }));
@@ -461,12 +466,12 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
         _sum: { fundingUsd: true },
         where: { execTime: { gte: fromDate, lte: toDate } },
       }),
+      // Count trades with no authoritative Bybit PnL (null source, or EXEC_FALLBACK local estimate)
       db.trade.count({
         where: {
           status: "CLOSED",
           closedAt: { gte: fromDate, lte: toDate },
-          realizedPnlUsd: null,
-          pnlUsd: null,
+          NOT: { pnlSource: { in: [...TRUSTED_PNL_SOURCES] } },
         },
       }),
     ]);
@@ -478,7 +483,11 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
     let sumRealizedPnlUsd = 0;
     let sumFeeUsd = 0;
     for (const t of trades) {
-      sumRealizedPnlUsd += t.realizedPnlUsd ?? t.pnlUsd ?? 0;
+      // Only sum authoritative Bybit-derived PnL — exclude local estimates (EXEC_FALLBACK,
+      // null source) which may be inflated, especially for positions with bad qty values.
+      if (TRUSTED_PNL_SOURCES.has(t.pnlSource ?? "")) {
+        sumRealizedPnlUsd += t.realizedPnlUsd ?? t.pnlUsd ?? 0;
+      }
       sumFeeUsd += (t.feeOpenUsd ?? 0) + (t.feeCloseUsd ?? 0);
     }
 
