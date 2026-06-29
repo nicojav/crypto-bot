@@ -26,8 +26,17 @@ function decimalsOf(step: number): number {
 }
 
 export function calcQty(maxUsd: number, leverage: number, markPrice: number, lotSize: number): number {
+  // Guard: reject non-finite or non-positive inputs — any would produce Infinity/NaN/negative qty.
+  if (!Number.isFinite(maxUsd)   || maxUsd   <= 0) return 0;
+  if (!Number.isFinite(leverage) || leverage <= 0) return 0;
+  if (!Number.isFinite(markPrice)|| markPrice <= 0) return 0;
+  if (!Number.isFinite(lotSize)  || lotSize   <= 0) return 0;
+
   const steps = Math.floor(maxUsd * leverage / markPrice / lotSize);
-  return Number((steps * lotSize).toFixed(decimalsOf(lotSize)));
+  if (!Number.isFinite(steps) || steps <= 0) return 0;
+
+  const qty = Number((steps * lotSize).toFixed(decimalsOf(lotSize)));
+  return Number.isFinite(qty) && qty > 0 ? qty : 0;
 }
 
 /** Round a price to the nearest instrument tick, preventing Bybit error 10001 on excess decimals. */
@@ -197,6 +206,10 @@ export class SignalProcessor {
     }
 
     const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, price, 0.001);
+    if (qty <= 0) {
+      await this.reject(signal.id, `calcQty returned ${qty} in dry-run (price=${price}) — check bot config`, bot.id);
+      return;
+    }
     const [, trade] = await this.db.$transaction([
       this.db.signal.update({
         where: { id: signal.id },
@@ -257,6 +270,10 @@ export class SignalProcessor {
     const markPrice = await this.exchange.getMarkPrice(symbol);
     const qty = calcQty(bot.maxPositionUsd, bot.maxLeverage, markPrice, instrument.lotSize);
 
+    if (qty <= 0) {
+      await this.reject(signal.id, `calcQty returned ${qty} (markPrice=${markPrice}, lotSize=${instrument.lotSize}, maxUsd=${bot.maxPositionUsd}, leverage=${bot.maxLeverage}) — check market data`, bot.id);
+      return;
+    }
     if (qty < instrument.minQty) {
       await this.reject(signal.id, `Calculated qty ${qty} is below minQty ${instrument.minQty}`, bot.id);
       return;
