@@ -147,6 +147,8 @@ export class Reconciler {
   }
 
   private lastWalletSnapshotAt = 0;
+  /** Last successfully persisted equity value — used to detect implausible spikes. */
+  private lastKnownEquity: number | null = null;
 
   private startBalanceSnapshots(): void {
     const snap = () =>
@@ -165,7 +167,31 @@ export class Reconciler {
   private async takeBalanceSnapshot(): Promise<void> {
     if (this.stopping) return;
     this.lastWalletSnapshotAt = Date.now();
-    const bal = await this.bybit.getBalance("USDT");
+
+    let bal: { equity: number; available: number };
+    try {
+      bal = await this.bybit.getBalance("USDT");
+    } catch (err) {
+      // getBalance throws when equity is missing or malformed — skip this snapshot
+      console.warn(`[reconciler] snapshot skipped: getBalance failed — ${(err as Error).message}`);
+      return;
+    }
+
+    // Sanity: skip snapshots that spike or crater implausibly vs the last known good value.
+    // A 10× move in one snapshot interval is almost certainly a transient bad read or an
+    // open position with an inflated unrealized PnL (e.g. Inf qty). Skipping prevents one
+    // bad snapshot from permanently corrupting the equity chart.
+    if (this.lastKnownEquity !== null && this.lastKnownEquity > 0) {
+      const ratio = bal.equity / this.lastKnownEquity;
+      if (ratio > 10 || ratio < 0.1) {
+        console.warn(
+          `[reconciler] snapshot skipped: equity=${bal.equity.toFixed(2)} vs last=${this.lastKnownEquity.toFixed(2)} (ratio=${ratio.toFixed(2)}) — implausible spike/drop, discarding`
+        );
+        return;
+      }
+    }
+
+    this.lastKnownEquity = bal.equity;
     await this.db.balanceSnapshot.create({
       data: { equityUsd: bal.equity, availableUsd: bal.available },
     });
@@ -269,30 +295,30 @@ export class Reconciler {
       where: { symbol: order.symbol, status: { in: ["OPEN", "CLOSING"] } },
     });
 
-    // 2. Liquidation branch: skip qty match — close all trades on the affected side
+    // 2. Liquidation branch: skip qty match — close all trades on the affected side.
+    // Distribute PnL + fees proportionally by qty-share so no single row looks inflated.
     if (isLiquidationCreateType(order.createType)) {
       const liquidationTrades = candidates.filter((t) => t.side === expectedDbSide);
       if (liquidationTrades.length === 0) {
         console.warn(`[reconciler] liquidation ${order.orderId}: no matching trades for ${order.symbol} side=${expectedDbSide}`);
         return;
       }
-      let firstTrade = true;
+      const sumQty = liquidationTrades.reduce((acc, t) => acc + t.qty, 0);
       for (const trade of liquidationTrades) {
-        // First trade absorbs the full liquidation PnL + fees; subsequent rows are tagged only
+        const share = sumQty > 0 ? trade.qty / sumQty : 1 / liquidationTrades.length;
+        const tradeRealizedPnl = realizedPnlUsd * share;
+        const tradeFeeClose   = feeCloseUsd   * share;
         await this.applyCloseExecution({
           tradeId: trade.id,
           botId: trade.botId,
           symbol: order.symbol,
           exitFillPrice,
-          feeCloseUsd: firstTrade ? feeCloseUsd : 0,
+          feeCloseUsd: tradeFeeClose,
           closingOrderId: order.orderId,
-          realizedPnlUsd: firstTrade ? realizedPnlUsd : 0,
+          realizedPnlUsd: tradeRealizedPnl,
           pnlSource: "BYBIT_LIQUIDATION",
         });
-        if (firstTrade) {
-          this.bus?.publish({ type: "trade.liquidated", data: { tradeId: trade.id, botId: trade.botId, symbol: order.symbol, realizedPnlUsd, createType: order.createType ?? "" } });
-          firstTrade = false;
-        }
+        this.bus?.publish({ type: "trade.liquidated", data: { tradeId: trade.id, botId: trade.botId, symbol: order.symbol, realizedPnlUsd: tradeRealizedPnl, createType: order.createType ?? "" } });
       }
       console.log(`[reconciler] liquidation: closed ${liquidationTrades.length} trade(s) for ${order.symbol} pnl=${realizedPnlUsd.toFixed(4)} createType=${order.createType ?? "?"}`);
       return;
@@ -366,6 +392,8 @@ export class Reconciler {
     const startTime = Math.max(Date.now() - sevenDaysMs, oldestOpenedAt - 5 * 60 * 1000);
 
     // 1. Try execution list for a real fill price (locally-computed PnL)
+    // The close fee applies to the whole position once, not to each constituent trade row.
+    // Distribute it proportionally by qty-share so no single row absorbs the full fee.
     let exitFillPrice: number | null = null;
     let feeCloseUsd = 0;
     try {
@@ -385,9 +413,13 @@ export class Reconciler {
     const nowMs = now.getTime();
 
     if (exitFillPrice !== null) {
+      const sumQty = openTrades.reduce((acc, t) => acc + t.qty, 0);
       for (const trade of openTrades) {
+        // Notional PnL is naturally per-trade (each row's qty × price delta).
+        // Fee is paid once for the whole position — split by qty-share.
+        const feeShare = sumQty > 0 ? trade.qty / sumQty : 1 / openTrades.length;
         const realizedPnlUsd =
-          (exitFillPrice - trade.entryPrice) * trade.qty * (trade.side === "BUY" ? 1 : -1) - feeCloseUsd;
+          (exitFillPrice - trade.entryPrice) * trade.qty * (trade.side === "BUY" ? 1 : -1) - feeCloseUsd * feeShare;
         await this.db.trade.update({
           where: { id: trade.id },
           data: {
@@ -396,7 +428,7 @@ export class Reconciler {
             exitFillPrice,
             pnlUsd: realizedPnlUsd,
             realizedPnlUsd,
-            feeCloseUsd,
+            feeCloseUsd: feeCloseUsd * feeShare,
             pnlSource: "EXEC_FALLBACK",
             closedAt: now,
           },
@@ -407,7 +439,9 @@ export class Reconciler {
       return;
     }
 
-    // 2. No execution found — try getClosedPnL for Bybit's authoritative per-position PnL
+    // 2. No execution found — try getClosedPnL for Bybit's authoritative per-position PnL.
+    // A single Bybit position is often made up of N bot Trade rows (stacked signals).
+    // Match by the sum of all row qtys, then distribute PnL + fees by qty-share.
     let closedPnlEntries: ClosedPnLEntry[] = [];
     try {
       closedPnlEntries = await this.bybit.getClosedPnL({ symbol, startTime });
@@ -415,49 +449,66 @@ export class Reconciler {
       console.warn("[reconciler] closeRemainingOpenTrades: getClosedPnL failed", err);
     }
 
+    // Group by side — each side's rows form one Bybit position
+    const tradesBySide = new Map<string, typeof openTrades>();
     for (const trade of openTrades) {
-      const sideFilter = trade.side === "BUY" ? "Buy" : "Sell";
-      const matched = closedPnlEntries.filter(
+      const existing = tradesBySide.get(trade.side) ?? [];
+      existing.push(trade);
+      tradesBySide.set(trade.side, existing);
+    }
+
+    for (const [side, sideGroup] of tradesBySide) {
+      const sideFilter = side === "BUY" ? "Buy" : "Sell";
+      const sumQty = sideGroup.reduce((acc, t) => acc + t.qty, 0);
+      const minOpenedAt = Math.min(...sideGroup.map((t) => t.openedAt.getTime()));
+
+      // Match Bybit position entry by the group's total qty (not each individual row)
+      const groupMatches = closedPnlEntries.filter(
         (e) =>
           e.side === sideFilter &&
-          Math.abs(e.qty - trade.qty) / Math.max(e.qty, trade.qty) < 0.005 &&
-          e.updatedTime >= trade.openedAt.getTime() - 5 * 60 * 1000 &&
+          Math.abs(e.qty - sumQty) / Math.max(e.qty, sumQty) < 0.005 &&
+          e.updatedTime >= minOpenedAt - 5 * 60 * 1000 &&
           e.updatedTime <= nowMs + 5 * 60 * 1000
       );
 
-      if (matched.length === 1) {
-        const entry = matched[0]!;
-        await this.applyCloseExecution({
-          tradeId: trade.id,
-          botId: trade.botId,
-          symbol,
-          exitFillPrice: entry.avgExitPrice,
-          feeCloseUsd: entry.closeFee,
-          feeOpenUsd: entry.openFee,
-          entryFillPrice: entry.avgEntryPrice,
-          closingOrderId: entry.orderId,
-          realizedPnlUsd: entry.closedPnl,
-          pnlSource: "BYBIT_REST",
-        });
-        console.log(`[reconciler] closedPnl fallback: closed trade #${trade.id} for ${symbol} pnl=${entry.closedPnl.toFixed(4)}`);
+      if (groupMatches.length === 1) {
+        const entry = groupMatches[0]!;
+        for (const trade of sideGroup) {
+          const share = sumQty > 0 ? trade.qty / sumQty : 1 / sideGroup.length;
+          await this.applyCloseExecution({
+            tradeId: trade.id,
+            botId: trade.botId,
+            symbol,
+            exitFillPrice: entry.avgExitPrice,
+            feeCloseUsd: entry.closeFee * share,
+            feeOpenUsd: entry.openFee * share,
+            entryFillPrice: entry.avgEntryPrice,
+            closingOrderId: entry.orderId,
+            realizedPnlUsd: entry.closedPnl * share,
+            pnlSource: "BYBIT_REST",
+          });
+          console.log(`[reconciler] closedPnl fallback: closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(entry.closedPnl * share).toFixed(4)}`);
+        }
       } else {
-        if (matched.length > 1) {
-          console.warn(`[reconciler] closedPnl fallback: ${matched.length} ambiguous matches for trade #${trade.id} ${symbol} — using null PnL`);
+        if (groupMatches.length > 1) {
+          console.warn(`[reconciler] closedPnl fallback: ${groupMatches.length} ambiguous matches for ${symbol} side=${side} sumQty=${sumQty} — using null PnL`);
         } else {
-          console.warn(`[reconciler] position closed: trade #${trade.id} for ${symbol} has no execution data`);
+          console.warn(`[reconciler] position closed: ${sideGroup.length} trade(s) for ${symbol} side=${side} have no execution data`);
         }
-        const ageMs = nowMs - trade.openedAt.getTime();
-        const isPhantom = ageMs < 5_000;
-        await this.db.trade.update({
-          where: { id: trade.id },
-          data: isPhantom
-            ? { status: "CLOSED", pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM", closedAt: now }
-            : { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
-        });
-        if (isPhantom) {
-          console.warn(`[reconciler] phantom: trade #${trade.id} for ${symbol} had no Bybit record (age=${ageMs}ms) — marked as PHANTOM`);
+        for (const trade of sideGroup) {
+          const ageMs = nowMs - trade.openedAt.getTime();
+          const isPhantom = ageMs < 5_000;
+          await this.db.trade.update({
+            where: { id: trade.id },
+            data: isPhantom
+              ? { status: "CLOSED", pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM", closedAt: now }
+              : { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
+          });
+          if (isPhantom) {
+            console.warn(`[reconciler] phantom: trade #${trade.id} for ${symbol} had no Bybit record (age=${ageMs}ms) — marked as PHANTOM`);
+          }
+          this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: isPhantom ? 0 : null } });
         }
-        this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: isPhantom ? 0 : null } });
       }
     }
     console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);

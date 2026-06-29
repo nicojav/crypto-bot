@@ -121,9 +121,16 @@ export class BybitClient {
     const account = res.result.list[0];
     const coinData = account?.coin.find((c) => c.coin === coin);
 
+    const equity = Number(coinData?.equity);
+    if (!Number.isFinite(equity) || equity < 0) {
+      throw new Error(
+        `getBalance: received invalid equity for ${coin}: ${String(coinData?.equity)} — Bybit may have returned an empty or malformed account payload`
+      );
+    }
+
     return {
       coin,
-      equity: Number(coinData?.equity ?? 0),
+      equity,
       available: Number(coinData?.walletBalance ?? 0),
     };
   }
