@@ -564,14 +564,18 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
     });
   });
 
-  // DELETE /api/reset-trade-data?confirm=true
-  // Wipes all Signals and Trades. Preserves Bots and BalanceSnapshots.
-  // Omit ?confirm=true for a dry-run (returns counts only, deletes nothing).
-  fastify.delete<{ Querystring: { confirm?: string } }>("/api/reset-trade-data", {
+  // DELETE /api/reset-trade-data?confirm=true[&full=true]
+  // Wipes Signals and Trades. Preserves Bots.
+  // Add full=true to also wipe BalanceSnapshots and FundingEvents (true clean slate).
+  // Omit confirm=true for a dry-run (returns counts only, deletes nothing).
+  fastify.delete<{ Querystring: { confirm?: string; full?: string } }>("/api/reset-trade-data", {
     schema: {
       querystring: {
         type: "object",
-        properties: { confirm: { type: "string" } },
+        properties: {
+          confirm: { type: "string" },
+          full: { type: "string" },
+        },
       },
       response: {
         200: {
@@ -580,27 +584,34 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
             dryRun: { type: "boolean" },
             trades: { type: "integer" },
             signals: { type: "integer" },
+            snapshots: { type: "integer" },
+            fundingEvents: { type: "integer" },
           },
-          required: ["dryRun", "trades", "signals"],
+          required: ["dryRun", "trades", "signals", "snapshots", "fundingEvents"],
         },
       },
     },
   }, async (req) => {
-    const [trades, signals] = await Promise.all([
+    const full = req.query.full === "true";
+    const [trades, signals, snapshots, fundingEvents] = await Promise.all([
       db.trade.count(),
       db.signal.count(),
+      full ? db.balanceSnapshot.count() : Promise.resolve(0),
+      full ? db.fundingEvent.count() : Promise.resolve(0),
     ]);
 
     if (req.query.confirm !== "true") {
-      return { dryRun: true, trades, signals };
+      return { dryRun: true, trades, signals, snapshots, fundingEvents };
     }
 
-    await db.$transaction([
+    const ops = [
       db.trade.deleteMany({}),
       db.signal.deleteMany({}),
-    ]);
+      ...(full ? [db.balanceSnapshot.deleteMany({}), db.fundingEvent.deleteMany({})] : []),
+    ];
+    await db.$transaction(ops);
 
-    return { dryRun: false, trades, signals };
+    return { dryRun: false, trades, signals, snapshots, fundingEvents };
   });
 
   // POST /api/kill-switch
