@@ -32,11 +32,14 @@ const absoluteDbPath = rawDbUrl.startsWith("file:/")
   ? rawDbUrl.slice("file:".length)
   : resolve(dirname(envPath), rawDbUrl.slice("file:".length));
 
-const dryRun    = process.argv.includes("--dry-run");
-const fromArg   = process.argv.find((a) => a.startsWith("--from="))?.slice(7)
-               ?? (process.argv[process.argv.indexOf("--from") + 1] ?? undefined);
-const toArg     = process.argv.find((a) => a.startsWith("--to="))?.slice(5)
-               ?? (process.argv[process.argv.indexOf("--to")   + 1] ?? undefined);
+const dryRun = process.argv.includes("--dry-run");
+
+function argAfter(flag: string): string | undefined {
+  const i = process.argv.indexOf(flag);
+  return i !== -1 ? process.argv[i + 1] : undefined;
+}
+const fromArg = process.argv.find((a) => a.startsWith("--from="))?.slice(7) ?? argAfter("--from");
+const toArg   = process.argv.find((a) => a.startsWith("--to="))?.slice(5)   ?? argAfter("--to");
 
 // Spike detection: a snapshot is an outlier when its equityUsd is more than
 // this factor above/below the local median (previous 5 valid snapshots).
