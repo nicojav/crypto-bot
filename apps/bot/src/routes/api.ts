@@ -5,7 +5,7 @@ import { env } from "../env.js";
 
 // PnL sources that are authoritative (from Bybit) — exclude local estimates and unresolved rows.
 // EXEC_FALLBACK is a local formula (unreliable); null-source rows have never been attributed.
-const TRUSTED_PNL_SOURCES = new Set(["BYBIT_WS", "BYBIT_REST", "BYBIT_REST_GROUPED", "BYBIT_LIQUIDATION", "PHANTOM"]);
+const TRUSTED_PNL_SOURCES = new Set(["BYBIT_WS", "BYBIT_REST", "BYBIT_REST_GROUPED", "BYBIT_REST_GROUPED_QTY_FIX", "BYBIT_LIQUIDATION", "PHANTOM"]);
 
 // ── Shared schemas ────────────────────────────────────────────────────────────
 
