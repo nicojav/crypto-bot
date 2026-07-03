@@ -130,31 +130,41 @@ async function main() {
       continue;
     }
 
-    const candidates2 = closedPnlEntries.filter(
-      (e) =>
-        e.side === sideFilter &&
-        Math.abs(e.qty - sumQty) / Math.max(e.qty, sumQty) < 0.005 &&
-        e.updatedTime >= startTime &&
-        e.updatedTime <= endTime
+    // Bybit often splits one position close into multiple partial-fill closedPnl entries
+    // (different exit prices as the close order walks the book) — sum every entry in the
+    // side+time window rather than requiring a single entry to match the group's qty.
+    const windowEntries = closedPnlEntries.filter(
+      (e) => e.side === sideFilter && e.updatedTime >= startTime && e.updatedTime <= endTime
     );
+    const windowSumQty = windowEntries.reduce((acc, e) => acc + e.qty, 0);
+    const isAggregateMatch =
+      windowEntries.length > 0 && Math.abs(windowSumQty - sumQty) / Math.max(windowSumQty, sumQty) < 0.005;
 
-    if (candidates2.length === 0) {
-      console.log(`  [no match] sumQty=${sumQty.toFixed(4)} — no Bybit entry matched`);
-      unmatchedGroups++;
-    } else if (candidates2.length > 1) {
-      console.log(`  [ambiguous] ${candidates2.length} Bybit entries matched sumQty=${sumQty.toFixed(4)}`);
-      ambiguousGroups++;
+    if (!isAggregateMatch) {
+      if (windowEntries.length === 0) {
+        console.log(`  [no match] sumQty=${sumQty.toFixed(4)} — no Bybit entry matched`);
+        unmatchedGroups++;
+      } else {
+        console.log(`  [ambiguous] ${windowEntries.length} Bybit entries found but sumQty=${windowSumQty.toFixed(4)} != expected=${sumQty.toFixed(4)}`);
+        ambiguousGroups++;
+      }
     } else {
-      const entry = candidates2[0]!;
+      const aggClosedPnl = windowEntries.reduce((acc, e) => acc + e.closedPnl, 0);
+      const aggOpenFee = windowEntries.reduce((acc, e) => acc + e.openFee, 0);
+      const aggCloseFee = windowEntries.reduce((acc, e) => acc + e.closeFee, 0);
+      const aggEntryPrice = windowEntries.reduce((acc, e) => acc + e.avgEntryPrice * e.qty, 0) / windowSumQty;
+      const aggExitPrice = windowEntries.reduce((acc, e) => acc + e.avgExitPrice * e.qty, 0) / windowSumQty;
+      const lastEntry = [...windowEntries].sort((a, b) => b.updatedTime - a.updatedTime)[0]!;
+
       console.log(
-        `  [match] pnl=${fmtUsd(entry.closedPnl)} openFee=${entry.openFee.toFixed(4)} closeFee=${entry.closeFee.toFixed(4)} bybitQty=${entry.qty}`
+        `  [match] pnl=${fmtUsd(aggClosedPnl)} openFee=${aggOpenFee.toFixed(4)} closeFee=${aggCloseFee.toFixed(4)} bybitQty=${windowSumQty.toFixed(4)} (from ${windowEntries.length} fill(s))`
       );
 
       for (const trade of groupTrades) {
         const share = trade.qty / sumQty;
-        const tradeRealizedPnl = entry.closedPnl * share;
-        const tradeFeeOpen = entry.openFee * share;
-        const tradeFeeClose = entry.closeFee * share;
+        const tradeRealizedPnl = aggClosedPnl * share;
+        const tradeFeeOpen = aggOpenFee * share;
+        const tradeFeeClose = aggCloseFee * share;
 
         console.log(
           `    → trade #${trade.id} qty=${trade.qty} share=${(share * 100).toFixed(1)}%` +
@@ -169,11 +179,11 @@ async function main() {
               pnlUsd: tradeRealizedPnl,
               feeOpenUsd: tradeFeeOpen,
               feeCloseUsd: tradeFeeClose,
-              entryFillPrice: entry.avgEntryPrice,
-              exitFillPrice: entry.avgExitPrice,
-              exitPrice: entry.avgExitPrice,
+              entryFillPrice: aggEntryPrice,
+              exitFillPrice: aggExitPrice,
+              exitPrice: aggExitPrice,
               pnlSource: "BYBIT_REST_GROUPED",
-              closingOrderId: trade.closingOrderId ?? entry.orderId,
+              closingOrderId: trade.closingOrderId ?? lastEntry.orderId,
             },
           });
         }

@@ -419,38 +419,46 @@ export class Reconciler {
       const sumQty = sideGroup.reduce((acc, t) => acc + t.qty, 0);
       const minOpenedAt = Math.min(...sideGroup.map((t) => t.openedAt.getTime()));
 
-      // Match Bybit position entry by the group's total qty (not each individual row)
-      const groupMatches = closedPnlEntries.filter(
-        (e) =>
-          e.side === sideFilter &&
-          Math.abs(e.qty - sumQty) / Math.max(e.qty, sumQty) < 0.005 &&
-          e.updatedTime >= minOpenedAt - 5 * 60 * 1000 &&
-          e.updatedTime <= nowMs + 5 * 60 * 1000
+      // Bybit often splits one position close into multiple partial-fill closedPnl entries
+      // (different exit prices as the close order walks the book) — sum every entry in the
+      // side+time window rather than requiring a single entry to match the group's qty.
+      const windowStart = minOpenedAt - 5 * 60 * 1000;
+      const windowEnd = nowMs + 5 * 60 * 1000;
+      const windowEntries = closedPnlEntries.filter(
+        (e) => e.side === sideFilter && e.updatedTime >= windowStart && e.updatedTime <= windowEnd
       );
+      const windowSumQty = windowEntries.reduce((acc, e) => acc + e.qty, 0);
+      const isAggregateMatch =
+        windowEntries.length > 0 && Math.abs(windowSumQty - sumQty) / Math.max(windowSumQty, sumQty) < 0.005;
 
-      if (groupMatches.length === 1) {
-        const entry = groupMatches[0]!;
+      if (isAggregateMatch) {
+        const aggClosedPnl = windowEntries.reduce((acc, e) => acc + e.closedPnl, 0);
+        const aggOpenFee = windowEntries.reduce((acc, e) => acc + e.openFee, 0);
+        const aggCloseFee = windowEntries.reduce((acc, e) => acc + e.closeFee, 0);
+        const aggEntryPrice = windowEntries.reduce((acc, e) => acc + e.avgEntryPrice * e.qty, 0) / windowSumQty;
+        const aggExitPrice = windowEntries.reduce((acc, e) => acc + e.avgExitPrice * e.qty, 0) / windowSumQty;
+        const lastEntry = [...windowEntries].sort((a, b) => b.updatedTime - a.updatedTime)[0]!;
         for (const trade of sideGroup) {
           const share = sumQty > 0 ? trade.qty / sumQty : 1 / sideGroup.length;
           await this.applyCloseExecution({
             tradeId: trade.id,
             botId: trade.botId,
             symbol,
-            exitFillPrice: entry.avgExitPrice,
-            feeCloseUsd: entry.closeFee * share,
-            feeOpenUsd: entry.openFee * share,
-            entryFillPrice: entry.avgEntryPrice,
-            closingOrderId: entry.orderId,
-            realizedPnlUsd: entry.closedPnl * share,
+            exitFillPrice: aggExitPrice,
+            feeCloseUsd: aggCloseFee * share,
+            feeOpenUsd: aggOpenFee * share,
+            entryFillPrice: aggEntryPrice,
+            closingOrderId: lastEntry.orderId,
+            realizedPnlUsd: aggClosedPnl * share,
             pnlSource: "BYBIT_REST",
           });
-          console.log(`[reconciler] closedPnl: closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(entry.closedPnl * share).toFixed(4)}`);
+          console.log(`[reconciler] closedPnl: closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(aggClosedPnl * share).toFixed(4)} (from ${windowEntries.length} fill(s))`);
         }
       } else {
-        if (groupMatches.length > 1) {
-          console.warn(`[reconciler] closedPnl: ${groupMatches.length} ambiguous matches for ${symbol} side=${side} sumQty=${sumQty} — falling back to execution list`);
+        if (windowEntries.length > 0) {
+          console.warn(`[reconciler] closedPnl: ${windowEntries.length} entries found but sumQty=${windowSumQty.toFixed(4)} != expected=${sumQty.toFixed(4)} for ${symbol} side=${side} — falling back to execution list`);
         } else {
-          console.warn(`[reconciler] closedPnl: no match for ${symbol} side=${side} sumQty=${sumQty} — falling back to execution list`);
+          console.warn(`[reconciler] closedPnl: no entries found for ${symbol} side=${side} sumQty=${sumQty} — falling back to execution list`);
         }
         unresolvedGroups.push([side, sideGroup]);
       }
