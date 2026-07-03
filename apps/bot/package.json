@@ -16,7 +16,8 @@
     "backfill:pnl": "tsx src/scripts/backfillRealizedPnl.ts",
     "mark-phantoms": "tsx src/scripts/markPhantomTrades.ts",
     "backfill:pnl-grouped": "tsx src/scripts/backfillRealizedPnlGrouped.ts",
-    "repair:history": "tsx src/scripts/repairHistory.ts"
+    "repair:history": "tsx src/scripts/repairHistory.ts",
+    "dump:closed-pnl": "tsx src/scripts/dumpClosedPnl.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
