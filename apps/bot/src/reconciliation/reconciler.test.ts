@@ -458,7 +458,7 @@ describe("closeRemainingOpenTrades", () => {
       {
         orderId: "rest-ord-1",
         symbol: "XRPUSDT",
-        side: "Buy",       // position side = Buy = long = BUY trade
+        side: "Sell",      // closing order side is opposite of the BUY position being closed
         qty: 100,
         avgEntryPrice: 3.00,
         avgExitPrice: 3.50,
@@ -492,7 +492,7 @@ describe("closeRemainingOpenTrades", () => {
     const entry = {
       orderId: "rest-amb",
       symbol: "XRPUSDT",
-      side: "Buy",
+      side: "Sell",      // closing order side is opposite of the BUY position being closed
       qty: 100,
       avgEntryPrice: 3.00,
       avgExitPrice: 3.50,

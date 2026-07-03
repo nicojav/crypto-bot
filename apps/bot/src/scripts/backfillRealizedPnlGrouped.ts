@@ -108,7 +108,10 @@ async function main() {
 
   for (const [key, groupTrades] of groups) {
     const [symbol, side] = key.split("|") as [string, string];
-    const sideFilter = side === "BUY" ? "Buy" : "Sell";
+    // getClosedPnL's "side" is the closing order's side, opposite of the position/DB
+    // side (same convention as dbSideForClosingOrder in reconciler.ts — verified
+    // empirically: a DB BUY trade's close is reported with side="Sell", and vice versa).
+    const sideFilter = side === "BUY" ? "Sell" : "Buy";
     const sumQty = groupTrades.reduce((acc, t) => acc + t.qty, 0);
     const minOpenedAt = Math.min(...groupTrades.map((t) => t.openedAt.getTime()));
     const maxClosedAt = Math.max(...groupTrades.map((t) => (t.closedAt ?? t.openedAt).getTime()));

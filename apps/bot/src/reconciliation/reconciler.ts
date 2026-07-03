@@ -415,7 +415,10 @@ export class Reconciler {
     const unresolvedGroups: [string, typeof openTrades][] = [];
 
     for (const [side, sideGroup] of tradesBySide) {
-      const sideFilter = side === "BUY" ? "Buy" : "Sell";
+      // getClosedPnL's "side" is the closing order's side, opposite of the position/DB
+      // side (same convention as dbSideForClosingOrder — verified empirically: a DB BUY
+      // trade's close is reported with side="Sell", and vice versa).
+      const sideFilter = side === "BUY" ? "Sell" : "Buy";
       const sumQty = sideGroup.reduce((acc, t) => acc + t.qty, 0);
       const minOpenedAt = Math.min(...sideGroup.map((t) => t.openedAt.getTime()));
 
