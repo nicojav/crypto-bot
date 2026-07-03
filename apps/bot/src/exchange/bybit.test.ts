@@ -11,11 +11,13 @@ vi.mock("../env.js", () => ({
 // Keep references to the mock functions so individual tests can override them.
 const mockGetExecutionList = vi.fn();
 const mockGetClosedPnL = vi.fn();
+const mockGetActiveOrders = vi.fn();
 
 vi.mock("bybit-api", () => ({
   RestClientV5: vi.fn(() => ({
     getExecutionList: mockGetExecutionList,
     getClosedPnL: mockGetClosedPnL,
+    getActiveOrders: mockGetActiveOrders,
     getServerTime: vi.fn().mockResolvedValue({ retCode: 0, result: { timeNano: String(Date.now() * 1_000_000) } }),
   })),
   WebsocketClient: vi.fn(() => ({
@@ -253,4 +255,71 @@ describe("getClosedPnL", () => {
     // Should not retry — only one call
     expect(mockGetClosedPnL).toHaveBeenCalledTimes(1);
   });
+});
+
+// ── getOrderFill ────────────────────────────────────────────────────────────
+
+function activeOrderRaw(overrides: Record<string, string> = {}) {
+  return {
+    cumExecQty: "0",
+    avgPrice: "0",
+    orderStatus: "New",
+    ...overrides,
+  };
+}
+
+describe("getOrderFill", () => {
+  let client: InstanceType<typeof BybitClient>;
+
+  beforeEach(() => {
+    client = new BybitClient();
+    vi.clearAllMocks();
+  });
+
+  it("returns immediately when the order is already Filled", async () => {
+    mockGetActiveOrders.mockResolvedValueOnce(
+      okPage([activeOrderRaw({ orderStatus: "Filled", cumExecQty: "30.8", avgPrice: "80.5" })])
+    );
+
+    const fill = await client.getOrderFill("SOLUSDT", "ord-1");
+
+    expect(fill).toEqual({ cumExecQty: 30.8, avgPrice: 80.5, status: "Filled" });
+    expect(mockGetActiveOrders).toHaveBeenCalledTimes(1);
+  });
+
+  it("regression: waits for a terminal status instead of returning on first visibility (premature zero-read)", async () => {
+    // First read: order visible but still "New" with cumExecQty=0 — must NOT be
+    // treated as a genuine zero-fill. Second read: reaches Filled with the real qty.
+    mockGetActiveOrders
+      .mockResolvedValueOnce(okPage([activeOrderRaw({ orderStatus: "New", cumExecQty: "0" })]))
+      .mockResolvedValueOnce(okPage([activeOrderRaw({ orderStatus: "Filled", cumExecQty: "30.8", avgPrice: "80.5" })]));
+
+    const fill = await client.getOrderFill("SOLUSDT", "ord-1");
+
+    expect(fill).toEqual({ cumExecQty: 30.8, avgPrice: 80.5, status: "Filled" });
+    expect(mockGetActiveOrders).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("returns correctly on a genuine zero-fill (terminal Cancelled status)", async () => {
+    mockGetActiveOrders.mockResolvedValueOnce(
+      okPage([activeOrderRaw({ orderStatus: "Cancelled", cumExecQty: "0" })])
+    );
+
+    const fill = await client.getOrderFill("SOLUSDT", "ord-1");
+
+    expect(fill).toEqual({ cumExecQty: 0, avgPrice: 0, status: "Cancelled" });
+  });
+
+  it("throws after exhausting attempts if the order never reaches a terminal status", async () => {
+    mockGetActiveOrders.mockResolvedValue(okPage([activeOrderRaw({ orderStatus: "PartiallyFilled", cumExecQty: "10" })]));
+
+    await expect(client.getOrderFill("SOLUSDT", "ord-1")).rejects.toThrow(/never reached a terminal status/);
+    expect(mockGetActiveOrders).toHaveBeenCalledTimes(6);
+  }, 10_000);
+
+  it("throws after exhausting attempts if the order is never visible", async () => {
+    mockGetActiveOrders.mockResolvedValue(okPage([]));
+
+    await expect(client.getOrderFill("SOLUSDT", "ord-1")).rejects.toThrow(/Order not found after 6 attempts/);
+  }, 10_000);
 });

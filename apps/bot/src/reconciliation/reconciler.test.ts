@@ -346,6 +346,30 @@ describe("hydrateOpenTradeFill", () => {
       })
     ).resolves.not.toThrow();
   });
+
+  it("warns (without mutating) when a fill arrives for a trade that is already CLOSED/PHANTOM", async () => {
+    const phantomOrderId = "phantom-ord-1";
+    const trade = await createSignalAndTrade({ side: "BUY", exchangeOrderId: phantomOrderId, qty: 100 });
+    await testDb.trade.update({
+      where: { id: trade.id },
+      data: { status: "CLOSED", pnlSource: "PHANTOM", pnlUsd: 0, realizedPnlUsd: 0, closedAt: new Date() },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+
+    await triggerOrderFill(reconciler, {
+      ...makeOrderEvent({ orderId: phantomOrderId, side: "Buy", qty: "100", avgPrice: "3.05" }),
+      reduceOnly: false,
+    });
+
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.status).toBe("CLOSED");
+    expect(updated.pnlSource).toBe("PHANTOM"); // unchanged — no mutation of the closed row
+    expect(updated.entryFillPrice).toBeNull();
+    expect(warnSpy.mock.calls.some(([msg]) => typeof msg === "string" && msg.includes("fill NOT recorded"))).toBe(true);
+
+    warnSpy.mockRestore();
+  });
 });
 
 // ── closeRemainingOpenTrades ──────────────────────────────────────────────────
@@ -483,26 +507,26 @@ describe("closeRemainingOpenTrades", () => {
     expect(updated.closingOrderId).toBe("rest-ord-1");
   });
 
-  it("falls back to null PnL when getClosedPnL returns ambiguous matches", async () => {
+  it("falls back to null PnL when getClosedPnL entries neither match individually nor sum to the target", async () => {
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
     // Backdate so the trade is old enough to not be phantom
     await testDb.trade.update({ where: { id: trade.id }, data: { openedAt: new Date(Date.now() - 10_000) } });
     mockGetExecutionList.mockResolvedValueOnce([]);
-    // Two entries with same side+qty — ambiguous
-    const entry = {
-      orderId: "rest-amb",
+    // Two entries, neither matching qty=100 alone, and their sum (120) doesn't reconcile either — genuinely ambiguous
+    const base = {
       symbol: "XRPUSDT",
       side: "Sell",      // closing order side is opposite of the BUY position being closed
-      qty: 100,
       avgEntryPrice: 3.00,
       avgExitPrice: 3.50,
-      closedPnl: 48.75,
       openFee: 0.15,
       closeFee: 0.10,
       createdTime: Date.now() - 5000,
       updatedTime: Date.now(),
     };
-    mockGetClosedPnL.mockResolvedValueOnce([entry, { ...entry, orderId: "rest-amb-2" }]);
+    mockGetClosedPnL.mockResolvedValueOnce([
+      { ...base, orderId: "rest-amb-1", qty: 60, closedPnl: 20 },
+      { ...base, orderId: "rest-amb-2", qty: 60, closedPnl: 20 },
+    ]);
 
     const reconciler = new Reconciler(testDb, mockBybit, mockBus);
     await triggerPositionZero(reconciler, "XRPUSDT");
@@ -511,6 +535,52 @@ describe("closeRemainingOpenTrades", () => {
     expect(updated.status).toBe("CLOSED");
     expect(updated.pnlSource).toBe("EXEC_FALLBACK");
     expect(updated.realizedPnlUsd).toBeNull();
+  });
+
+  it("prefers a single reconciling entry over summing the whole window (ignores an unrelated entry)", async () => {
+    const trade = await createSignalAndTrade({ side: "BUY", qty: 30.9, symbol: "XRPUSDT" });
+    await testDb.trade.update({ where: { id: trade.id }, data: { openedAt: new Date(Date.now() - 10_000) } });
+    mockGetExecutionList.mockResolvedValueOnce([]);
+    // One unrelated entry (belongs to a different, untracked close) + one exact match.
+    // Summing both (55.2) would fail tolerance under the old logic — the fix should
+    // recognize the single exact match and ignore the unrelated entry.
+    mockGetClosedPnL.mockResolvedValueOnce([
+      {
+        orderId: "unrelated",
+        symbol: "XRPUSDT",
+        side: "Sell",
+        qty: 24.3,
+        avgEntryPrice: 1.0,
+        avgExitPrice: 1.01,
+        closedPnl: -7.56,
+        openFee: 0.1,
+        closeFee: 0.1,
+        createdTime: Date.now() - 5000,
+        updatedTime: Date.now(),
+      },
+      {
+        orderId: "real-match",
+        symbol: "XRPUSDT",
+        side: "Sell",
+        qty: 30.9,
+        avgEntryPrice: 80.71,
+        avgExitPrice: 80.62,
+        closedPnl: -5.5019,
+        openFee: 1.3717,
+        closeFee: 1.3702,
+        createdTime: Date.now() - 5000,
+        updatedTime: Date.now(),
+      },
+    ]);
+
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+    await triggerPositionZero(reconciler, "XRPUSDT");
+
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.status).toBe("CLOSED");
+    expect(updated.pnlSource).toBe("BYBIT_REST");
+    expect(updated.realizedPnlUsd).toBeCloseTo(-5.5019);
+    expect(updated.closingOrderId).toBe("real-match");
   });
 
   it("closes even when getExecutionList throws", async () => {

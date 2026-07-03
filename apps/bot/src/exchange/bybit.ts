@@ -52,6 +52,10 @@ export interface ClosedPnLEntry {
 
 const RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
 
+// Terminal order states for IOC/market orders — once reached, cumExecQty is final.
+// "New"/"PartiallyFilled"/"Untriggered" mean the order may still fill further.
+const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "PartiallyFilledCanceled"]);
+
 function isNetworkError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message.toLowerCase();
@@ -225,8 +229,9 @@ export class BybitClient {
    * Retries briefly because the order may not register on the first tick after placement.
    */
   async getOrderFill(symbol: string, orderId: string): Promise<{ cumExecQty: number; avgPrice: number; status: string }> {
-    const ATTEMPTS = 4;
+    const ATTEMPTS = 6;
     const DELAY_MS = 250;
+    let lastSeen: { cumExecQty: string; avgPrice: string; orderStatus: string } | undefined;
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
       const res = await withRetry(() =>
@@ -237,13 +242,24 @@ export class BybitClient {
         | { cumExecQty: string; avgPrice: string; orderStatus: string }
         | undefined;
       if (order) {
-        return {
-          cumExecQty: Number(order.cumExecQty),
-          avgPrice: Number(order.avgPrice),
-          status: order.orderStatus,
-        };
+        if (TERMINAL_ORDER_STATUSES.has(order.orderStatus)) {
+          return {
+            cumExecQty: Number(order.cumExecQty),
+            avgPrice: Number(order.avgPrice),
+            status: order.orderStatus,
+          };
+        }
+        lastSeen = order;
+        console.warn(`[bybit] getOrderFill: ${orderId} not yet terminal (status=${order.orderStatus}, attempt ${attempt + 1}/${ATTEMPTS})`);
+      } else {
+        console.warn(`[bybit] getOrderFill: ${orderId} not yet visible (attempt ${attempt + 1}/${ATTEMPTS})`);
       }
-      console.warn(`[bybit] getOrderFill: ${orderId} not yet visible (attempt ${attempt + 1}/${ATTEMPTS})`);
+    }
+    if (lastSeen) {
+      throw new Error(
+        `Order ${orderId} never reached a terminal status after ${ATTEMPTS} attempts ` +
+        `(last status=${lastSeen.orderStatus}, cumExecQty=${lastSeen.cumExecQty})`
+      );
     }
     throw new Error(`Order not found after ${ATTEMPTS} attempts: ${orderId}`);
   }

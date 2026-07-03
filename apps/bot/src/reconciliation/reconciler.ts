@@ -3,6 +3,7 @@ import type { PrismaClient } from "../generated/prisma/client.js";
 import type { BybitClient, ClosedPnLEntry } from "../exchange/bybit.js";
 import type { EventBus } from "../eventBus.js";
 import { env } from "../env.js";
+import { matchClosedPnl } from "./closedPnlMatcher.js";
 
 interface WsPositionUpdate {
   symbol: string;
@@ -422,43 +423,37 @@ export class Reconciler {
       const sumQty = sideGroup.reduce((acc, t) => acc + t.qty, 0);
       const minOpenedAt = Math.min(...sideGroup.map((t) => t.openedAt.getTime()));
 
-      // Bybit often splits one position close into multiple partial-fill closedPnl entries
-      // (different exit prices as the close order walks the book) — sum every entry in the
-      // side+time window rather than requiring a single entry to match the group's qty.
-      const windowStart = minOpenedAt - 5 * 60 * 1000;
+      // The close just happened (position hit 0), so the real entry is near "now" —
+      // narrow the window start to that instead of all the way back to openedAt, which
+      // for long-held trades can pull in an unrelated position's close that happens to
+      // sit nearby in time (confirmed in prod). Never narrower than minOpenedAt, though.
+      const windowStart = Math.max(minOpenedAt, nowMs - 30 * 60 * 1000);
       const windowEnd = nowMs + 5 * 60 * 1000;
       const windowEntries = closedPnlEntries.filter(
         (e) => e.side === sideFilter && e.updatedTime >= windowStart && e.updatedTime <= windowEnd
       );
-      const windowSumQty = windowEntries.reduce((acc, e) => acc + e.qty, 0);
-      const isAggregateMatch =
-        windowEntries.length > 0 && Math.abs(windowSumQty - sumQty) / Math.max(windowSumQty, sumQty) < 0.005;
+      const match = matchClosedPnl(windowEntries, sumQty);
 
-      if (isAggregateMatch) {
-        const aggClosedPnl = windowEntries.reduce((acc, e) => acc + e.closedPnl, 0);
-        const aggOpenFee = windowEntries.reduce((acc, e) => acc + e.openFee, 0);
-        const aggCloseFee = windowEntries.reduce((acc, e) => acc + e.closeFee, 0);
-        const aggEntryPrice = windowEntries.reduce((acc, e) => acc + e.avgEntryPrice * e.qty, 0) / windowSumQty;
-        const aggExitPrice = windowEntries.reduce((acc, e) => acc + e.avgExitPrice * e.qty, 0) / windowSumQty;
-        const lastEntry = [...windowEntries].sort((a, b) => b.updatedTime - a.updatedTime)[0]!;
+      if (match) {
         for (const trade of sideGroup) {
           const share = sumQty > 0 ? trade.qty / sumQty : 1 / sideGroup.length;
           await this.applyCloseExecution({
             tradeId: trade.id,
             botId: trade.botId,
             symbol,
-            exitFillPrice: aggExitPrice,
-            feeCloseUsd: aggCloseFee * share,
-            feeOpenUsd: aggOpenFee * share,
-            entryFillPrice: aggEntryPrice,
-            closingOrderId: lastEntry.orderId,
-            realizedPnlUsd: aggClosedPnl * share,
+            exitFillPrice: match.avgExitPrice,
+            feeCloseUsd: match.closeFee * share,
+            feeOpenUsd: match.openFee * share,
+            entryFillPrice: match.avgEntryPrice,
+            closingOrderId: match.lastEntry.orderId,
+            realizedPnlUsd: match.closedPnl * share,
             pnlSource: "BYBIT_REST",
           });
-          console.log(`[reconciler] closedPnl: closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(aggClosedPnl * share).toFixed(4)} (from ${windowEntries.length} fill(s))`);
+          console.log(`[reconciler] closedPnl (${match.mode}): closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(match.closedPnl * share).toFixed(4)} (from ${match.entries.length} fill(s))`);
         }
       } else {
         if (windowEntries.length > 0) {
+          const windowSumQty = windowEntries.reduce((acc, e) => acc + e.qty, 0);
           console.warn(`[reconciler] closedPnl: ${windowEntries.length} entries found but sumQty=${windowSumQty.toFixed(4)} != expected=${sumQty.toFixed(4)} for ${symbol} side=${side} — falling back to execution list`);
         } else {
           console.warn(`[reconciler] closedPnl: no entries found for ${symbol} side=${side} sumQty=${sumQty} — falling back to execution list`);
@@ -543,7 +538,25 @@ export class Reconciler {
     const trade = await this.db.trade.findFirst({
       where: { exchangeOrderId: order.orderId, status: { in: ["OPEN", "CLOSING"] } },
     });
-    if (!trade) return;
+    if (!trade) {
+      // Not open/closing — if a fill still landed here, the qty is about to be
+      // dropped silently. Surface it: if the order belongs to an already-CLOSED
+      // (e.g. prematurely PHANTOM-stamped) trade, this is exactly the qty-drift
+      // failure mode we've seen — log loudly so it's visible, without mutating
+      // the already-closed row (reopening it is out of scope).
+      const cumExecQty = Number(order.cumExecQty);
+      if (cumExecQty > 0) {
+        const closedTrade = await this.db.trade.findFirst({ where: { exchangeOrderId: order.orderId } });
+        if (closedTrade) {
+          console.warn(
+            `[reconciler] open fill: WS fill for order=${order.orderId} arrived but trade #${closedTrade.id} ` +
+            `is already ${closedTrade.status} (pnlSource=${closedTrade.pnlSource ?? "null"}) cumExecQty=${cumExecQty} ` +
+            `— fill NOT recorded (possible qty drift)`
+          );
+        }
+      }
+      return;
+    }
 
     const cumExecQty = Number(order.cumExecQty);
     await this.db.trade.update({
