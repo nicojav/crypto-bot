@@ -353,6 +353,7 @@ describe("hydrateOpenTradeFill", () => {
 describe("closeRemainingOpenTrades", () => {
   it("closes an OPEN trade with EXEC_FALLBACK when a reduce-only execution is found", async () => {
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, entryPrice: 3.00, symbol: "XRPUSDT" });
+    mockGetClosedPnL.mockResolvedValueOnce([]); // no authoritative match — falls back to execution list
     mockGetExecutionList.mockResolvedValueOnce([
       {
         orderId: "close-exec-ord",
@@ -381,6 +382,7 @@ describe("closeRemainingOpenTrades", () => {
   it("closes all OPEN and CLOSING trades for the symbol", async () => {
     await createSignalAndTrade({ side: "BUY", qty: 50, status: "OPEN", symbol: "XRPUSDT" });
     await createSignalAndTrade({ side: "BUY", qty: 50, status: "CLOSING", symbol: "XRPUSDT" });
+    mockGetClosedPnL.mockResolvedValueOnce([]); // no authoritative match — falls back to execution list
     mockGetExecutionList.mockResolvedValueOnce([
       {
         orderId: "exec-close-multi",

@@ -391,55 +391,10 @@ export class Reconciler {
     const oldestOpenedAt = Math.min(...openTrades.map((t) => t.openedAt.getTime()));
     const startTime = Math.max(Date.now() - sevenDaysMs, oldestOpenedAt - 5 * 60 * 1000);
 
-    // 1. Try execution list for a real fill price (locally-computed PnL)
-    // The close fee applies to the whole position once, not to each constituent trade row.
-    // Distribute it proportionally by qty-share so no single row absorbs the full fee.
-    let exitFillPrice: number | null = null;
-    let feeCloseUsd = 0;
-    try {
-      const execs = await this.bybit.getExecutionList({ symbol, startTime, limit: 100 });
-      const closeExec = execs
-        .filter((e) => e.closedSize > 0)
-        .sort((a, b) => b.execTime - a.execTime)[0];
-      if (closeExec) {
-        exitFillPrice = closeExec.execPrice;
-        feeCloseUsd = closeExec.execFee;
-      }
-    } catch (err) {
-      console.warn("[reconciler] closeRemainingOpenTrades: getExecutionList failed", err);
-    }
-
     const now = new Date();
     const nowMs = now.getTime();
 
-    if (exitFillPrice !== null) {
-      const sumQty = openTrades.reduce((acc, t) => acc + t.qty, 0);
-      for (const trade of openTrades) {
-        // Notional PnL is naturally per-trade (each row's qty × price delta).
-        // Fee is paid once for the whole position — split by qty-share.
-        const feeShare = sumQty > 0 ? trade.qty / sumQty : 1 / openTrades.length;
-        const realizedPnlUsd =
-          (exitFillPrice - trade.entryPrice) * trade.qty * (trade.side === "BUY" ? 1 : -1) - feeCloseUsd * feeShare;
-        await this.db.trade.update({
-          where: { id: trade.id },
-          data: {
-            status: "CLOSED",
-            exitPrice: exitFillPrice,
-            exitFillPrice,
-            pnlUsd: realizedPnlUsd,
-            realizedPnlUsd,
-            feeCloseUsd: feeCloseUsd * feeShare,
-            pnlSource: "EXEC_FALLBACK",
-            closedAt: now,
-          },
-        });
-        this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: realizedPnlUsd } });
-      }
-      console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);
-      return;
-    }
-
-    // 2. No execution found — try getClosedPnL for Bybit's authoritative per-position PnL.
+    // 1. Try getClosedPnL first for Bybit's authoritative per-position PnL.
     // A single Bybit position is often made up of N bot Trade rows (stacked signals).
     // Match by the sum of all row qtys, then distribute PnL + fees by qty-share.
     let closedPnlEntries: ClosedPnLEntry[] = [];
@@ -456,6 +411,8 @@ export class Reconciler {
       existing.push(trade);
       tradesBySide.set(trade.side, existing);
     }
+
+    const unresolvedGroups: [string, typeof openTrades][] = [];
 
     for (const [side, sideGroup] of tradesBySide) {
       const sideFilter = side === "BUY" ? "Buy" : "Sell";
@@ -487,15 +444,66 @@ export class Reconciler {
             realizedPnlUsd: entry.closedPnl * share,
             pnlSource: "BYBIT_REST",
           });
-          console.log(`[reconciler] closedPnl fallback: closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(entry.closedPnl * share).toFixed(4)}`);
+          console.log(`[reconciler] closedPnl: closed trade #${trade.id} for ${symbol} share=${(share * 100).toFixed(1)}% pnl=${(entry.closedPnl * share).toFixed(4)}`);
         }
       } else {
         if (groupMatches.length > 1) {
-          console.warn(`[reconciler] closedPnl fallback: ${groupMatches.length} ambiguous matches for ${symbol} side=${side} sumQty=${sumQty} — using null PnL`);
+          console.warn(`[reconciler] closedPnl: ${groupMatches.length} ambiguous matches for ${symbol} side=${side} sumQty=${sumQty} — falling back to execution list`);
         } else {
-          console.warn(`[reconciler] position closed: ${sideGroup.length} trade(s) for ${symbol} side=${side} have no execution data`);
+          console.warn(`[reconciler] closedPnl: no match for ${symbol} side=${side} sumQty=${sumQty} — falling back to execution list`);
         }
-        for (const trade of sideGroup) {
+        unresolvedGroups.push([side, sideGroup]);
+      }
+    }
+
+    if (unresolvedGroups.length > 0) {
+      // 2. getClosedPnL couldn't resolve these — try the execution list for a real fill
+      // price (locally-computed PnL). The close fee applies to the whole position once,
+      // not to each constituent trade row — distribute it proportionally by qty-share.
+      let exitFillPrice: number | null = null;
+      let feeCloseUsd = 0;
+      try {
+        const execs = await this.bybit.getExecutionList({ symbol, startTime, limit: 100 });
+        const closeExec = execs
+          .filter((e) => e.closedSize > 0)
+          .sort((a, b) => b.execTime - a.execTime)[0];
+        if (closeExec) {
+          exitFillPrice = closeExec.execPrice;
+          feeCloseUsd = closeExec.execFee;
+        }
+      } catch (err) {
+        console.warn("[reconciler] closeRemainingOpenTrades: getExecutionList failed", err);
+      }
+
+      const unresolvedTrades = unresolvedGroups.flatMap(([, group]) => group);
+
+      if (exitFillPrice !== null) {
+        const sumQty = unresolvedTrades.reduce((acc, t) => acc + t.qty, 0);
+        for (const trade of unresolvedTrades) {
+          // Notional PnL is naturally per-trade (each row's qty × price delta).
+          // Fee is paid once for the whole position — split by qty-share.
+          const feeShare = sumQty > 0 ? trade.qty / sumQty : 1 / unresolvedTrades.length;
+          const realizedPnlUsd =
+            (exitFillPrice - trade.entryPrice) * trade.qty * (trade.side === "BUY" ? 1 : -1) - feeCloseUsd * feeShare;
+          await this.db.trade.update({
+            where: { id: trade.id },
+            data: {
+              status: "CLOSED",
+              exitPrice: exitFillPrice,
+              exitFillPrice,
+              pnlUsd: realizedPnlUsd,
+              realizedPnlUsd,
+              feeCloseUsd: feeCloseUsd * feeShare,
+              pnlSource: "EXEC_FALLBACK",
+              closedAt: now,
+            },
+          });
+          this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: realizedPnlUsd } });
+        }
+      } else {
+        // 3. No execution data either — mark as phantom (if very recent) or leave PnL
+        // unattributed (EXEC_FALLBACK with null PnL), to be resolved by the backfill script.
+        for (const trade of unresolvedTrades) {
           const ageMs = nowMs - trade.openedAt.getTime();
           const isPhantom = ageMs < 5_000;
           await this.db.trade.update({
@@ -511,6 +519,7 @@ export class Reconciler {
         }
       }
     }
+
     console.log(`[reconciler] position zero: closed ${openTrades.length} trade(s) for ${symbol}`);
   }
 

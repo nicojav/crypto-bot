@@ -67,20 +67,21 @@ async function main() {
 
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
+  // Target rows with an untrusted PnL source: EXEC_FALLBACK (locally-estimated, possibly
+  // inflated) and null-source (never attributed). PHANTOM and already-trusted sources
+  // (BYBIT_WS/BYBIT_REST/BYBIT_REST_GROUPED) are left untouched.
   const candidates = await prisma.trade.findMany({
     where: {
       status: "CLOSED",
-      realizedPnlUsd: null,
-      pnlUsd: null,
-      pnlSource: { not: "PHANTOM" },
       closedAt: { gte: sevenDaysAgo },
+      OR: [{ pnlSource: "EXEC_FALLBACK" }, { pnlSource: null }],
       ...(symbolArg ? { symbol: symbolArg } : {}),
     },
     orderBy: { closedAt: "asc" },
   });
 
   if (candidates.length === 0) {
-    console.log("No null-PnL CLOSED non-phantom trades found.");
+    console.log("No EXEC_FALLBACK or null-source CLOSED trades found.");
     await prisma.$disconnect();
     return;
   }
