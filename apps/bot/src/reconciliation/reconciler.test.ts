@@ -815,3 +815,56 @@ describe("handleFundingExecution", () => {
     expect(event.fundingUsd).toBeCloseTo(0.0888);
   });
 });
+
+// ── runPnlBackfill ──────────────────────────────────────────────────────────
+
+describe("runPnlBackfill", () => {
+  it("resolves an EXEC_FALLBACK trade once a matching Bybit entry is available, and publishes trade.closed", async () => {
+    const trade = await createSignalAndTrade({ side: "BUY", qty: 30, symbol: "SOLUSDT", entryPrice: 80 });
+    await testDb.trade.update({
+      where: { id: trade.id },
+      data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: new Date() },
+    });
+    mockGetClosedPnL.mockResolvedValueOnce([
+      {
+        orderId: "ord-retry-match",
+        symbol: "SOLUSDT",
+        side: "Sell",
+        qty: 30,
+        avgEntryPrice: 80,
+        avgExitPrice: 81,
+        closedPnl: 30,
+        openFee: 1,
+        closeFee: 1,
+        createdTime: Date.now() - 1000,
+        updatedTime: Date.now(),
+      },
+    ]);
+
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+    await reconciler.runPnlBackfill();
+
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.pnlSource).toBe("BYBIT_REST_GROUPED");
+    expect(updated.pnlUsd).toBeCloseTo(30);
+    expect(publishedEvents).toContainEqual({
+      type: "trade.closed",
+      data: { tradeId: trade.id, botId, symbol: "SOLUSDT", pnlUsd: 30 },
+    });
+  });
+
+  it("leaves a trade untouched when no matching entry is found yet", async () => {
+    const trade = await createSignalAndTrade({ side: "BUY", qty: 30, symbol: "SOLUSDT" });
+    await testDb.trade.update({
+      where: { id: trade.id },
+      data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: new Date() },
+    });
+    mockGetClosedPnL.mockResolvedValueOnce([]);
+
+    const reconciler = new Reconciler(testDb, mockBybit, mockBus);
+    await reconciler.runPnlBackfill();
+
+    const unchanged = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(unchanged.pnlSource).toBe("EXEC_FALLBACK");
+  });
+});

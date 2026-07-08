@@ -8,7 +8,10 @@
  *
  * This script groups Trade rows by (symbol, side, closedAt-minute-bucket), sums their
  * qtys, matches the sum against Bybit's closedPnL, and distributes the returned
- * PnL/fees proportionally by each row's qty share.
+ * PnL/fees proportionally by each row's qty share. The matching/grouping/update logic
+ * itself lives in ../reconciliation/pnlBackfill.ts (shared with the reconciler's
+ * periodic retry — see reconciliation/reconciler.ts runPnlBackfill) — this script is a
+ * thin CLI wrapper around it.
  *
  * Usage:
  *   npm run backfill:pnl-grouped -- --dry-run       # print matches without writing
@@ -30,7 +33,7 @@
 import dotenv from "dotenv";
 import { resolve, dirname } from "path";
 import { existsSync } from "fs";
-import { matchClosedPnl } from "../reconciliation/closedPnlMatcher.js";
+import { backfillClosedPnl, type PnlBackfillReporter } from "../reconciliation/pnlBackfill.js";
 
 const envPath = resolve(__dirname, "../../.env");
 dotenv.config({ path: envPath });
@@ -58,6 +61,64 @@ function fmtUsd(n: number): string {
   return (n >= 0 ? "+" : "") + n.toFixed(4) + " USD";
 }
 
+function makeCliReporter(): PnlBackfillReporter {
+  return {
+    onStart(candidateCount, groupCount) {
+      if (candidateCount === 0) {
+        console.log("No EXEC_FALLBACK or null-source CLOSED trades found.");
+        return;
+      }
+      console.log(`Found ${candidateCount} candidate trade(s) — grouping by (symbol, side, closedAt minute)...\n`);
+      console.log(`Formed ${groupCount} group(s):\n`);
+    },
+    onGroupStart(symbol, side, groupTrades, sumQty) {
+      console.log(`  Group: ${symbol} ${side} rows=${groupTrades.length} sumQty=${sumQty.toFixed(4)}`);
+      groupTrades.forEach((t) =>
+        console.log(`    trade #${t.id} qty=${t.qty} opened=${t.openedAt.toISOString()} closed=${(t.closedAt ?? t.openedAt).toISOString()}`)
+      );
+    },
+    onGroupOutcome(outcome) {
+      switch (outcome.kind) {
+        case "matched": {
+          const { match, distribution } = outcome;
+          console.log(
+            `  [match ${match.mode}] pnl=${fmtUsd(match.closedPnl)} openFee=${match.openFee.toFixed(4)} closeFee=${match.closeFee.toFixed(4)} bybitQty=${match.qty.toFixed(4)} (from ${match.entries.length} fill(s), orderId(s)=${match.entries.map((e) => e.orderId).join(",")})`
+          );
+          for (const { trade, share, pnl, feeOpen, feeClose } of distribution) {
+            console.log(
+              `    → trade #${trade.id} qty=${trade.qty} share=${(share * 100).toFixed(1)}%` +
+              ` pnl=${fmtUsd(pnl)} feeOpen=${feeOpen.toFixed(4)} feeClose=${feeClose.toFixed(4)}`
+            );
+          }
+          break;
+        }
+        case "qtyFix": {
+          const { trade, entry, applied } = outcome;
+          const diff = entry.qty - trade.qty;
+          console.log(
+            `  [qty-fix ${applied ? "applying" : "available, rerun with --allow-qty-fix"}] ` +
+            `trade #${trade.id} DB qty=${trade.qty} → Bybit qty=${entry.qty} (diff ${diff >= 0 ? "+" : ""}${diff.toFixed(4)}) ` +
+            `orderId=${entry.orderId} pnl=${fmtUsd(entry.closedPnl)}`
+          );
+          break;
+        }
+        case "ambiguous": {
+          const windowSumQty = outcome.windowEntries.reduce((acc, e) => acc + e.qty, 0);
+          console.log(`  [ambiguous] ${outcome.windowEntries.length} Bybit entries found but sumQty=${windowSumQty.toFixed(4)} != expected=${outcome.sumQty.toFixed(4)}`);
+          break;
+        }
+        case "unmatched":
+          console.log(`  [no match] sumQty=${outcome.sumQty.toFixed(4)} — no Bybit entry matched`);
+          break;
+        case "error":
+          console.error(`  [error] getClosedPnL failed: ${outcome.error.message}`);
+          break;
+      }
+      console.log();
+    },
+  };
+}
+
 async function main() {
   if (!existsSync(absoluteDbPath)) {
     console.error(`[error] Database file not found: ${absoluteDbPath}`);
@@ -81,178 +142,24 @@ async function main() {
 
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-  // Target rows with an untrusted PnL source: EXEC_FALLBACK (locally-estimated, possibly
-  // inflated) and null-source (never attributed). PHANTOM and already-trusted sources
-  // (BYBIT_WS/BYBIT_REST/BYBIT_REST_GROUPED) are left untouched.
-  const candidates = await prisma.trade.findMany({
-    where: {
-      status: "CLOSED",
-      closedAt: { gte: sevenDaysAgo },
-      OR: [{ pnlSource: "EXEC_FALLBACK" }, { pnlSource: null }],
-      ...(symbolArg ? { symbol: symbolArg } : {}),
-    },
-    orderBy: { closedAt: "asc" },
+  const result = await backfillClosedPnl(prisma, bybit, {
+    since: sevenDaysAgo,
+    symbol: symbolArg,
+    dryRun,
+    allowQtyFix,
+    reporter: makeCliReporter(),
   });
 
-  if (candidates.length === 0) {
-    console.log("No EXEC_FALLBACK or null-source CLOSED trades found.");
-    await prisma.$disconnect();
-    return;
+  if (result.candidatesScanned > 0) {
+    console.log("=== Summary ===");
+    console.log(`  Groups scanned:    ${result.groupsScanned}`);
+    console.log(`  Matched:           ${result.matchedGroups} (${result.matchedRows} rows updated)`);
+    console.log(`  Qty-fixed:         ${result.qtyFixed}`);
+    console.log(`  Qty-fix available: ${result.qtyFixAvailable}${result.qtyFixAvailable > 0 && !allowQtyFix ? " (rerun with --allow-qty-fix to apply)" : ""}`);
+    console.log(`  Ambiguous:         ${result.ambiguousGroups}`);
+    console.log(`  Unmatched:         ${result.unmatchedGroups}`);
+    if (dryRun) console.log("\n  (DRY RUN — no changes written)");
   }
-
-  console.log(`Found ${candidates.length} candidate trade(s) — grouping by (symbol, side, closedAt minute)...\n`);
-
-  // Group by (symbol, side, floor(closedAt / 60s))
-  const groups = new Map<string, typeof candidates>();
-  for (const trade of candidates) {
-    const closedMs = (trade.closedAt ?? trade.openedAt).getTime();
-    const bucket = Math.floor(closedMs / 60_000);
-    const key = `${trade.symbol}|${trade.side}|${bucket}`;
-    const list = groups.get(key) ?? [];
-    list.push(trade);
-    groups.set(key, list);
-  }
-
-  console.log(`Formed ${groups.size} group(s):\n`);
-
-  let matchedGroups = 0;
-  let matchedRows = 0;
-  let ambiguousGroups = 0;
-  let unmatchedGroups = 0;
-  let qtyFixed = 0;
-  let qtyFixAvailable = 0;
-
-  for (const [key, groupTrades] of groups) {
-    const [symbol, side] = key.split("|") as [string, string];
-    // getClosedPnL's "side" is the closing order's side, opposite of the position/DB
-    // side (same convention as dbSideForClosingOrder in reconciler.ts — verified
-    // empirically: a DB BUY trade's close is reported with side="Sell", and vice versa).
-    const sideFilter = side === "BUY" ? "Sell" : "Buy";
-    const sumQty = groupTrades.reduce((acc, t) => acc + t.qty, 0);
-    // Each row's closedAt is already known precisely for a backfill — anchor the window
-    // on that (not openedAt, which for long-held trades can be hours earlier and pulls
-    // in unrelated closes that happen to sit nearby in time; confirmed in prod).
-    const minClosedAt = Math.min(...groupTrades.map((t) => (t.closedAt ?? t.openedAt).getTime()));
-    const maxClosedAt = Math.max(...groupTrades.map((t) => (t.closedAt ?? t.openedAt).getTime()));
-    const startTime = minClosedAt - 10 * 60 * 1000;
-    const endTime = maxClosedAt + 10 * 60 * 1000;
-
-    console.log(`  Group: ${symbol} ${side} rows=${groupTrades.length} sumQty=${sumQty.toFixed(4)}`);
-    groupTrades.forEach((t) =>
-      console.log(`    trade #${t.id} qty=${t.qty} opened=${t.openedAt.toISOString()} closed=${(t.closedAt ?? t.openedAt).toISOString()}`)
-    );
-
-    let closedPnlEntries: Awaited<ReturnType<typeof bybit.getClosedPnL>>;
-    try {
-      closedPnlEntries = await bybit.getClosedPnL({ symbol, startTime, endTime });
-    } catch (err) {
-      console.error(`  [error] getClosedPnL failed: ${(err as Error).message}`);
-      unmatchedGroups++;
-      console.log();
-      continue;
-    }
-
-    const windowEntries = closedPnlEntries.filter(
-      (e) => e.side === sideFilter && e.updatedTime >= startTime && e.updatedTime <= endTime
-    );
-    const match = matchClosedPnl(windowEntries, sumQty);
-
-    if (match) {
-      console.log(
-        `  [match ${match.mode}] pnl=${fmtUsd(match.closedPnl)} openFee=${match.openFee.toFixed(4)} closeFee=${match.closeFee.toFixed(4)} bybitQty=${match.qty.toFixed(4)} (from ${match.entries.length} fill(s), orderId(s)=${match.entries.map((e) => e.orderId).join(",")})`
-      );
-
-      for (const trade of groupTrades) {
-        const share = trade.qty / sumQty;
-        const tradeRealizedPnl = match.closedPnl * share;
-        const tradeFeeOpen = match.openFee * share;
-        const tradeFeeClose = match.closeFee * share;
-
-        console.log(
-          `    → trade #${trade.id} qty=${trade.qty} share=${(share * 100).toFixed(1)}%` +
-          ` pnl=${fmtUsd(tradeRealizedPnl)} feeOpen=${tradeFeeOpen.toFixed(4)} feeClose=${tradeFeeClose.toFixed(4)}`
-        );
-
-        if (!dryRun) {
-          await prisma.trade.update({
-            where: { id: trade.id },
-            data: {
-              realizedPnlUsd: tradeRealizedPnl,
-              pnlUsd: tradeRealizedPnl,
-              feeOpenUsd: tradeFeeOpen,
-              feeCloseUsd: tradeFeeClose,
-              entryFillPrice: match.avgEntryPrice,
-              exitFillPrice: match.avgExitPrice,
-              exitPrice: match.avgExitPrice,
-              pnlSource: "BYBIT_REST_GROUPED",
-              closingOrderId: trade.closingOrderId ?? match.lastEntry.orderId,
-            },
-          });
-        }
-      }
-
-      matchedGroups++;
-      matchedRows += groupTrades.length;
-    } else if (groupTrades.length === 1 && windowEntries.length === 1) {
-      // No ambiguity about WHICH entry belongs here (exactly one DB row, exactly one
-      // Bybit entry in the window) — only the qty disagrees. This is a known bug where
-      // a trade's own fill was under-recorded (see bybit.ts getOrderFill fix) and the
-      // real executed size only surfaces later in Bybit's closedPnl data. Since there's
-      // no ambiguity, the lone entry is authoritative for qty too — but this rewrites a
-      // previously-recorded historical fact, so it's gated behind --allow-qty-fix.
-      const trade = groupTrades[0]!;
-      const entry = windowEntries[0]!;
-      const diff = entry.qty - trade.qty;
-      console.log(
-        `  [qty-fix ${allowQtyFix ? "applying" : "available, rerun with --allow-qty-fix"}] ` +
-        `trade #${trade.id} DB qty=${trade.qty} → Bybit qty=${entry.qty} (diff ${diff >= 0 ? "+" : ""}${diff.toFixed(4)}) ` +
-        `orderId=${entry.orderId} pnl=${fmtUsd(entry.closedPnl)}`
-      );
-
-      if (allowQtyFix) {
-        if (!dryRun) {
-          await prisma.trade.update({
-            where: { id: trade.id },
-            data: {
-              qty: entry.qty,
-              realizedPnlUsd: entry.closedPnl,
-              pnlUsd: entry.closedPnl,
-              feeOpenUsd: entry.openFee,
-              feeCloseUsd: entry.closeFee,
-              entryFillPrice: entry.avgEntryPrice,
-              exitFillPrice: entry.avgExitPrice,
-              exitPrice: entry.avgExitPrice,
-              pnlSource: "BYBIT_REST_GROUPED_QTY_FIX",
-              closingOrderId: trade.closingOrderId ?? entry.orderId,
-            },
-          });
-        }
-        qtyFixed++;
-      } else {
-        qtyFixAvailable++;
-      }
-    } else {
-      const windowSumQty = windowEntries.reduce((acc, e) => acc + e.qty, 0);
-      if (windowEntries.length === 0) {
-        console.log(`  [no match] sumQty=${sumQty.toFixed(4)} — no Bybit entry matched`);
-        unmatchedGroups++;
-      } else {
-        console.log(`  [ambiguous] ${windowEntries.length} Bybit entries found but sumQty=${windowSumQty.toFixed(4)} != expected=${sumQty.toFixed(4)}`);
-        ambiguousGroups++;
-      }
-    }
-
-    console.log();
-  }
-
-  console.log("=== Summary ===");
-  console.log(`  Groups scanned:    ${groups.size}`);
-  console.log(`  Matched:           ${matchedGroups} (${matchedRows} rows updated)`);
-  console.log(`  Qty-fixed:         ${qtyFixed}`);
-  console.log(`  Qty-fix available: ${qtyFixAvailable}${qtyFixAvailable > 0 && !allowQtyFix ? " (rerun with --allow-qty-fix to apply)" : ""}`);
-  console.log(`  Ambiguous:         ${ambiguousGroups}`);
-  console.log(`  Unmatched:         ${unmatchedGroups}`);
-  if (dryRun) console.log("\n  (DRY RUN — no changes written)");
 
   await prisma.$disconnect();
 }

@@ -4,6 +4,16 @@ import type { BybitClient, ClosedPnLEntry } from "../exchange/bybit.js";
 import type { EventBus } from "../eventBus.js";
 import { env } from "../env.js";
 import { matchClosedPnl } from "./closedPnlMatcher.js";
+import { backfillClosedPnl } from "./pnlBackfill.js";
+
+// closeRemainingOpenTrades makes one live getClosedPnL attempt at the moment a position
+// hits zero. Bybit's REST closed-pnl endpoint can lag the just-closed position by a few
+// minutes (eventual consistency, outside our control) — trades that miss that one-shot
+// attempt fall to EXEC_FALLBACK and are otherwise never revisited. This periodic sweep
+// retries them using the same matching logic, closing that gap.
+const PNL_BACKFILL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const PNL_BACKFILL_LOOKBACK_MS = 48 * 60 * 60 * 1000; // 48 hours
+const PNL_BACKFILL_STARTUP_DELAY_MS = 45_000; // resolve any backlog from downtime promptly
 
 interface WsPositionUpdate {
   symbol: string;
@@ -56,6 +66,8 @@ export class Reconciler {
   private ws: WebsocketClient | null = null;
   private balanceTimer: ReturnType<typeof setInterval> | null = null;
   private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
+  private pnlBackfillTimer: ReturnType<typeof setInterval> | null = null;
+  private pnlBackfillStartupTimer: ReturnType<typeof setTimeout> | null = null;
   private stopping = false;
   private lastWsActivityAt = Date.now();
   private wsAuthFailed = false;
@@ -73,6 +85,7 @@ export class Reconciler {
     this.initWebSocket();
     this.startBalanceSnapshots();
     this.startPeriodicReconciliation();
+    this.startPeriodicPnlBackfill();
   }
 
   stop(): void {
@@ -84,6 +97,14 @@ export class Reconciler {
     if (this.reconciliationTimer !== null) {
       clearInterval(this.reconciliationTimer);
       this.reconciliationTimer = null;
+    }
+    if (this.pnlBackfillTimer !== null) {
+      clearInterval(this.pnlBackfillTimer);
+      this.pnlBackfillTimer = null;
+    }
+    if (this.pnlBackfillStartupTimer !== null) {
+      clearTimeout(this.pnlBackfillStartupTimer);
+      this.pnlBackfillStartupTimer = null;
     }
     if (this.ws) {
       this.ws.closeAll();
@@ -98,6 +119,46 @@ export class Reconciler {
         console.error("[reconciler] periodic reconciliation error:", err)
       );
     }, 60_000);
+  }
+
+  private startPeriodicPnlBackfill(): void {
+    // One prompt attempt shortly after boot to clear any backlog from downtime, then a
+    // steady interval — same failure-isolation pattern as the other periodic timers.
+    this.pnlBackfillStartupTimer = setTimeout(() => {
+      if (this.stopping) return;
+      this.runPnlBackfill().catch((err: unknown) =>
+        console.error("[reconciler] startup pnl backfill error:", err)
+      );
+    }, PNL_BACKFILL_STARTUP_DELAY_MS);
+
+    this.pnlBackfillTimer = setInterval(() => {
+      if (this.stopping) return;
+      this.runPnlBackfill().catch((err: unknown) =>
+        console.error("[reconciler] periodic pnl backfill error:", err)
+      );
+    }, PNL_BACKFILL_INTERVAL_MS);
+  }
+
+  /**
+   * Retries getClosedPnL matching for recently-CLOSED trades still tagged
+   * EXEC_FALLBACK/null (see PNL_BACKFILL_INTERVAL_MS comment above). Never applies the
+   * qty correction (allowQtyFix: false) — that stays a deliberate, human-reviewed CLI
+   * operation (npm run backfill:pnl-grouped -- --allow-qty-fix).
+   */
+  async runPnlBackfill(): Promise<void> {
+    const since = new Date(Date.now() - PNL_BACKFILL_LOOKBACK_MS);
+    const result = await backfillClosedPnl(this.db, this.bybit, {
+      since,
+      dryRun: false,
+      allowQtyFix: false,
+      bus: this.bus,
+    });
+    if (result.matchedRows > 0 || result.qtyFixAvailable > 0) {
+      console.log(
+        `[reconciler] pnl backfill: resolved ${result.matchedRows} row(s)` +
+        (result.qtyFixAvailable > 0 ? `, ${result.qtyFixAvailable} qty-fix candidate(s) left for manual CLI review` : "")
+      );
+    }
   }
 
   private initWebSocket(): void {
