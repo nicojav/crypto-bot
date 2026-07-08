@@ -14,6 +14,31 @@ packages/
   eslint-config Shared ESLint rules
 ```
 
+## Architecture
+
+High-level view of how the pieces connect. See [`apps/bot/README.md`](apps/bot/README.md) and
+[`apps/dashboard/README.md`](apps/dashboard/README.md) for detailed internal diagrams of each app.
+
+```mermaid
+graph LR
+    TV["TradingView<br/>(Pine alerts)"] -->|webhook POST| BOT
+
+    subgraph BOT["apps/bot — Fastify backend"]
+        direction TB
+        WH[Webhook + REST API] --> CORE[Signal Processor + Reconciler]
+        CORE --> TDB[(SQLite / Prisma)]
+        CORE --> BUS[EventBus] --> WSS[WS server]
+    end
+
+    CORE <-->|REST + private WS| BYBIT[Bybit Exchange]
+
+    DASH["apps/dashboard — React"] -->|REST /api/*| WH
+    WSS -->|live trade/signal events| DASH
+```
+
+> **Keeping this in sync:** whenever a feature or bug fix changes how these pieces connect,
+> update this diagram (and the per-app ones) as part of that change — see `CLAUDE.md`.
+
 ## Prerequisites
 
 - Node.js ≥ 20
