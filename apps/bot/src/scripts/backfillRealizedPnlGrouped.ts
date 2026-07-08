@@ -110,6 +110,9 @@ function makeCliReporter(): PnlBackfillReporter {
         case "unmatched":
           console.log(`  [no match] sumQty=${outcome.sumQty.toFixed(4)} — no Bybit entry matched`);
           break;
+        case "phantomPromoted":
+          console.log(`  [phantom-promoted] trade #${outcome.trade.id} had no Bybit evidence after the grace period — marked PHANTOM (pnl=$0)`);
+          break;
         case "error":
           console.error(`  [error] getClosedPnL failed: ${outcome.error.message}`);
           break;
@@ -158,6 +161,7 @@ async function main() {
     console.log(`  Qty-fix available: ${result.qtyFixAvailable}${result.qtyFixAvailable > 0 && !allowQtyFix ? " (rerun with --allow-qty-fix to apply)" : ""}`);
     console.log(`  Ambiguous:         ${result.ambiguousGroups}`);
     console.log(`  Unmatched:         ${result.unmatchedGroups}`);
+    console.log(`  Phantom-promoted:  ${result.phantomPromoted}`);
     if (dryRun) console.log("\n  (DRY RUN — no changes written)");
   }
 

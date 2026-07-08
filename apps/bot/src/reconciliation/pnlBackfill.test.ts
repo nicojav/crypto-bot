@@ -61,6 +61,7 @@ async function createClosedTrade(overrides: Partial<{
   qty: number;
   entryPrice: number;
   pnlSource: string | null;
+  openedAt: Date;
   closedAt: Date;
 }> = {}) {
   const sig = await testDb.signal.create({
@@ -77,6 +78,7 @@ async function createClosedTrade(overrides: Partial<{
       entryPrice: overrides.entryPrice ?? 80,
       status: "CLOSED",
       pnlSource: overrides.pnlSource === undefined ? "EXEC_FALLBACK" : overrides.pnlSource,
+      openedAt: overrides.openedAt ?? new Date(),
       closedAt: overrides.closedAt ?? new Date(),
     },
   });
@@ -195,6 +197,63 @@ describe("backfillClosedPnl", () => {
     expect(result.candidatesScanned).toBe(0);
     expect(mockGetClosedPnL).not.toHaveBeenCalled();
     const unchanged = await testDb.trade.findUniqueOrThrow({ where: { id: oldTrade.id } });
+    expect(unchanged.pnlSource).toBe("EXEC_FALLBACK");
+  });
+
+  it("promotes a short-held trade to PHANTOM once the grace period has passed with no Bybit evidence", async () => {
+    const openedAt = new Date(Date.now() - 20 * 60 * 1000); // 20 min ago
+    const closedAt = new Date(openedAt.getTime() + 2_000); // held 2s — under PHANTOM_MAX_HOLD_MS
+    const trade = await createClosedTrade({ side: "BUY", qty: 30, openedAt, closedAt });
+    mockGetClosedPnL.mockResolvedValueOnce([]);
+
+    const result = await backfillClosedPnl(testDb, mockBybit, { since: new Date(Date.now() - 60 * 60 * 1000) });
+
+    expect(result.phantomPromoted).toBe(1);
+    expect(result.unmatchedGroups).toBe(0);
+    const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(updated.pnlSource).toBe("PHANTOM");
+    expect(updated.pnlUsd).toBe(0);
+    expect(updated.realizedPnlUsd).toBe(0);
+  });
+
+  it("does not promote to PHANTOM before the grace period has elapsed", async () => {
+    const openedAt = new Date(Date.now() - 2_000);
+    const closedAt = new Date(); // closed just now — grace period not elapsed
+    const trade = await createClosedTrade({ side: "BUY", qty: 30, openedAt, closedAt });
+    mockGetClosedPnL.mockResolvedValueOnce([]);
+
+    const result = await backfillClosedPnl(testDb, mockBybit, { since: new Date(Date.now() - 60 * 60 * 1000) });
+
+    expect(result.phantomPromoted).toBe(0);
+    expect(result.unmatchedGroups).toBe(1);
+    const unchanged = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(unchanged.pnlSource).toBe("EXEC_FALLBACK");
+  });
+
+  it("does not promote to PHANTOM when the trade was held longer than the fast-flip window", async () => {
+    const openedAt = new Date(Date.now() - 20 * 60 * 1000);
+    const closedAt = new Date(openedAt.getTime() + 60_000); // held 60s — a real trade, not a flip artifact
+    const trade = await createClosedTrade({ side: "BUY", qty: 30, openedAt, closedAt });
+    mockGetClosedPnL.mockResolvedValueOnce([]);
+
+    const result = await backfillClosedPnl(testDb, mockBybit, { since: new Date(Date.now() - 60 * 60 * 1000) });
+
+    expect(result.phantomPromoted).toBe(0);
+    expect(result.unmatchedGroups).toBe(1);
+    const unchanged = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
+    expect(unchanged.pnlSource).toBe("EXEC_FALLBACK");
+  });
+
+  it("does not promote to PHANTOM in dryRun mode but still reports the count", async () => {
+    const openedAt = new Date(Date.now() - 20 * 60 * 1000);
+    const closedAt = new Date(openedAt.getTime() + 2_000);
+    const trade = await createClosedTrade({ side: "BUY", qty: 30, openedAt, closedAt });
+    mockGetClosedPnL.mockResolvedValueOnce([]);
+
+    const result = await backfillClosedPnl(testDb, mockBybit, { since: new Date(Date.now() - 60 * 60 * 1000), dryRun: true });
+
+    expect(result.phantomPromoted).toBe(1);
+    const unchanged = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
     expect(unchanged.pnlSource).toBe("EXEC_FALLBACK");
   });
 

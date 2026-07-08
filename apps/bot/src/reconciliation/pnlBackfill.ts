@@ -2,6 +2,16 @@ import type { PrismaClient, Trade } from "../generated/prisma/client.js";
 import type { BybitClient, ClosedPnLEntry } from "../exchange/bybit.js";
 import type { EventBus } from "../eventBus.js";
 import { matchClosedPnl, type ClosedPnlMatch } from "./closedPnlMatcher.js";
+import { logReconciliationEvent } from "./reconciliationLog.js";
+
+// A trade held for less than this before closing looks like the "opened and immediately
+// reversed by the next flip" pattern that used to be judged PHANTOM synchronously. A
+// group with genuinely zero Bybit evidence is only promoted to PHANTOM once BOTH this
+// held-duration heuristic matches AND PHANTOM_GRACE_PERIOD_MS has passed since it closed
+// — long enough that any Bybit indexing lag has certainly resolved, so "still no evidence"
+// means "really never filled" rather than "just hasn't shown up yet".
+const PHANTOM_MAX_HOLD_MS = 5_000;
+const PHANTOM_GRACE_PERIOD_MS = 15 * 60 * 1000;
 
 /**
  * Shared core of the grouped PnL backfill: finds CLOSED trades with an untrusted
@@ -30,6 +40,7 @@ export type PnlBackfillGroupOutcome =
   | { kind: "qtyFix"; symbol: string; side: string; trade: Trade; entry: ClosedPnLEntry; applied: boolean }
   | { kind: "ambiguous"; symbol: string; side: string; sumQty: number; windowEntries: ClosedPnLEntry[] }
   | { kind: "unmatched"; symbol: string; side: string; sumQty: number }
+  | { kind: "phantomPromoted"; symbol: string; side: string; trade: Trade }
   | { kind: "error"; symbol: string; side: string; error: Error };
 
 export interface PnlBackfillReporter {
@@ -59,6 +70,7 @@ export interface PnlBackfillResult {
   qtyFixAvailable: number;
   ambiguousGroups: number;
   unmatchedGroups: number;
+  phantomPromoted: number;
 }
 
 export async function backfillClosedPnl(
@@ -77,7 +89,9 @@ export async function backfillClosedPnl(
     qtyFixAvailable: 0,
     ambiguousGroups: 0,
     unmatchedGroups: 0,
+    phantomPromoted: 0,
   };
+  const nowMs = Date.now();
 
   // Target rows with an untrusted PnL source: EXEC_FALLBACK (locally-estimated, possibly
   // inflated) and null-source (never attributed). PHANTOM and already-trusted sources
@@ -205,6 +219,13 @@ export async function backfillClosedPnl(
             },
           });
           bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: entry.closedPnl } });
+          logReconciliationEvent(db, {
+            type: "QTY_DRIFT_FIXED",
+            tradeId: trade.id,
+            symbol,
+            message: `Corrected trade #${trade.id} qty ${trade.qty} → ${entry.qty} from Bybit's authoritative closedPnl entry`,
+            details: { orderId: entry.orderId, dbQty: trade.qty, bybitQty: entry.qty, diff: entry.qty - trade.qty },
+          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
         }
         result.qtyFixed++;
       } else {
@@ -212,8 +233,32 @@ export async function backfillClosedPnl(
       }
       reporter?.onGroupOutcome?.({ kind: "qtyFix", symbol, side, trade, entry, applied: allowQtyFix });
     } else if (windowEntries.length === 0) {
-      result.unmatchedGroups++;
-      reporter?.onGroupOutcome?.({ kind: "unmatched", symbol, side, sumQty });
+      const trade = groupTrades.length === 1 ? groupTrades[0]! : null;
+      const holdMs = trade ? (trade.closedAt ?? trade.openedAt).getTime() - trade.openedAt.getTime() : null;
+      const closedMs = trade ? (trade.closedAt ?? trade.openedAt).getTime() : null;
+      const gracePassed = closedMs !== null && nowMs - closedMs > PHANTOM_GRACE_PERIOD_MS;
+
+      if (trade && holdMs !== null && holdMs < PHANTOM_MAX_HOLD_MS && gracePassed) {
+        if (!dryRun) {
+          await db.trade.update({
+            where: { id: trade.id },
+            data: { pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM" },
+          });
+          bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: 0 } });
+          logReconciliationEvent(db, {
+            type: "PHANTOM_PROMOTED",
+            tradeId: trade.id,
+            symbol,
+            message: `Trade #${trade.id} promoted to PHANTOM after ${PHANTOM_GRACE_PERIOD_MS / 60_000}min with no Bybit evidence (held ${holdMs}ms)`,
+            details: { holdMs, ageMs: nowMs - closedMs! },
+          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+        }
+        result.phantomPromoted++;
+        reporter?.onGroupOutcome?.({ kind: "phantomPromoted", symbol, side, trade });
+      } else {
+        result.unmatchedGroups++;
+        reporter?.onGroupOutcome?.({ kind: "unmatched", symbol, side, sumQty });
+      }
     } else {
       result.ambiguousGroups++;
       reporter?.onGroupOutcome?.({ kind: "ambiguous", symbol, side, sumQty, windowEntries });

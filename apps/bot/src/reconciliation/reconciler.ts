@@ -5,6 +5,7 @@ import type { EventBus } from "../eventBus.js";
 import { env } from "../env.js";
 import { matchClosedPnl } from "./closedPnlMatcher.js";
 import { backfillClosedPnl } from "./pnlBackfill.js";
+import { logReconciliationEvent } from "./reconciliationLog.js";
 
 // closeRemainingOpenTrades makes one live getClosedPnL attempt at the moment a position
 // hits zero. Bybit's REST closed-pnl endpoint can lag the just-closed position by a few
@@ -153,9 +154,10 @@ export class Reconciler {
       allowQtyFix: false,
       bus: this.bus,
     });
-    if (result.matchedRows > 0 || result.qtyFixAvailable > 0) {
+    if (result.matchedRows > 0 || result.qtyFixAvailable > 0 || result.phantomPromoted > 0) {
       console.log(
         `[reconciler] pnl backfill: resolved ${result.matchedRows} row(s)` +
+        (result.phantomPromoted > 0 ? `, promoted ${result.phantomPromoted} to PHANTOM` : "") +
         (result.qtyFixAvailable > 0 ? `, ${result.qtyFixAvailable} qty-fix candidate(s) left for manual CLI review` : "")
       );
     }
@@ -396,6 +398,12 @@ export class Reconciler {
 
     if (matched.length === 0) {
       console.warn(`[reconciler] order fill ${order.orderId}: no matching trade for ${order.symbol} (side=${expectedDbSide}, qty=${orderQty})`);
+      logReconciliationEvent(this.db, {
+        type: "FILL_DROPPED",
+        symbol: order.symbol,
+        message: `Reduce-only fill ${order.orderId} had no matching OPEN/CLOSING trade (side=${expectedDbSide}, qty=${orderQty})`,
+        details: { orderId: order.orderId, side: expectedDbSide, qty: orderQty },
+      }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
       return;
     }
     if (matched.length > 1) {
@@ -568,21 +576,27 @@ export class Reconciler {
           this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: realizedPnlUsd } });
         }
       } else {
-        // 3. No execution data either — mark as phantom (if very recent) or leave PnL
-        // unattributed (EXEC_FALLBACK with null PnL), to be resolved by the backfill script.
+        // 3. No execution data either — leave PnL unattributed (EXEC_FALLBACK, null PnL).
+        // Do NOT decide PHANTOM here: Bybit's data can lag a just-closed position by
+        // minutes (confirmed in prod), so a synchronous "age < 5s → PHANTOM" shortcut
+        // risks permanently zeroing out a real trade that simply hasn't shown up in
+        // Bybit's API yet. The periodic pnlBackfill sweep (runPnlBackfill) promotes a
+        // trade to PHANTOM later, only once a generous grace period has passed with
+        // still no evidence — see pnlBackfill.ts PHANTOM_GRACE_PERIOD_MS.
         for (const trade of unresolvedTrades) {
-          const ageMs = nowMs - trade.openedAt.getTime();
-          const isPhantom = ageMs < 5_000;
           await this.db.trade.update({
             where: { id: trade.id },
-            data: isPhantom
-              ? { status: "CLOSED", pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM", closedAt: now }
-              : { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
+            data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
           });
-          if (isPhantom) {
-            console.warn(`[reconciler] phantom: trade #${trade.id} for ${symbol} had no Bybit record (age=${ageMs}ms) — marked as PHANTOM`);
-          }
-          this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: isPhantom ? 0 : null } });
+          console.warn(`[reconciler] no Bybit record for trade #${trade.id} (${symbol}) at close time — tagged EXEC_FALLBACK, periodic backfill will retry`);
+          logReconciliationEvent(this.db, {
+            type: "NO_CLOSEDPNL_MATCH",
+            tradeId: trade.id,
+            symbol,
+            message: `No Bybit closedPnl/execution evidence for trade #${trade.id} at close time`,
+            details: { ageMs: nowMs - trade.openedAt.getTime() },
+          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+          this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: null } });
         }
       }
     }
@@ -614,6 +628,13 @@ export class Reconciler {
             `is already ${closedTrade.status} (pnlSource=${closedTrade.pnlSource ?? "null"}) cumExecQty=${cumExecQty} ` +
             `— fill NOT recorded (possible qty drift)`
           );
+          logReconciliationEvent(this.db, {
+            type: "FILL_DROPPED",
+            tradeId: closedTrade.id,
+            symbol: closedTrade.symbol,
+            message: `Entry fill for order=${order.orderId} arrived after trade #${closedTrade.id} was already ${closedTrade.status} — fill not recorded`,
+            details: { orderId: order.orderId, cumExecQty, tradeStatus: closedTrade.status, pnlSource: closedTrade.pnlSource },
+          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
         }
       }
       return;

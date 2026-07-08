@@ -91,3 +91,22 @@ model FundingEvent {
 
   @@index([symbol, execTime])
 }
+
+// Persistent audit trail for reconciliation anomalies (dropped fills, qty drift, phantom
+// promotions, unmatched closedPnl lookups). Console logs are ephemeral — Railway's log
+// retention doesn't reach back far enough to forensically investigate an issue reported
+// days later. tradeId is intentionally a bare column (no enforced relation): some events
+// have no associated trade (e.g. a fill for an unknown order), and trades can be wiped by
+// reset-trade-data without needing to cascade this audit history.
+model ReconciliationEvent {
+  id          Int      @id @default(autoincrement())
+  type        String   // FILL_DROPPED | QTY_DRIFT_DETECTED | PHANTOM_PROMOTED | NO_CLOSEDPNL_MATCH | ...
+  tradeId     Int?
+  symbol      String?
+  message     String
+  detailsJson String?  // structured context, e.g. {"orderId":"...","dbQty":30.6,"bybitQty":27.1}
+  createdAt   DateTime @default(now())
+
+  @@index([type, createdAt])
+  @@index([symbol, createdAt])
+}

@@ -459,8 +459,11 @@ describe("closeRemainingOpenTrades", () => {
     expect(updated.exitFillPrice).toBeNull();
   });
 
-  it("marks trade as PHANTOM (pnlUsd=0) when no Bybit data and trade was just opened", async () => {
-    // Trade created with openedAt ≈ now (< 5s old) — phantom fingerprint
+  it("tags EXEC_FALLBACK (not an immediate PHANTOM) when no Bybit data and trade was just opened", async () => {
+    // A synchronous "age < 5s -> PHANTOM" decision risks zeroing out a real trade whose
+    // Bybit data simply hasn't propagated yet (confirmed in prod) — closeRemainingOpenTrades
+    // must never decide PHANTOM itself. That's now the periodic pnlBackfill sweep's job,
+    // only after a grace period with still no evidence (see pnlBackfill.test.ts).
     const trade = await createSignalAndTrade({ side: "BUY", qty: 100, symbol: "XRPUSDT" });
     mockGetExecutionList.mockResolvedValueOnce([]);
     mockGetClosedPnL.mockResolvedValueOnce([]);
@@ -470,9 +473,8 @@ describe("closeRemainingOpenTrades", () => {
 
     const updated = await testDb.trade.findUniqueOrThrow({ where: { id: trade.id } });
     expect(updated.status).toBe("CLOSED");
-    expect(updated.pnlSource).toBe("PHANTOM");
-    expect(updated.pnlUsd).toBe(0);
-    expect(updated.realizedPnlUsd).toBe(0);
+    expect(updated.pnlSource).toBe("EXEC_FALLBACK");
+    expect(updated.pnlUsd).toBeNull();
   });
 
   it("closes with BYBIT_REST when getExecutionList finds nothing but getClosedPnL matches", async () => {
