@@ -219,13 +219,13 @@ export async function backfillClosedPnl(
             },
           });
           bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: entry.closedPnl } });
-          logReconciliationEvent(db, {
+          await logReconciliationEvent(db, {
             type: "QTY_DRIFT_FIXED",
             tradeId: trade.id,
             symbol,
             message: `Corrected trade #${trade.id} qty ${trade.qty} → ${entry.qty} from Bybit's authoritative closedPnl entry`,
             details: { orderId: entry.orderId, dbQty: trade.qty, bybitQty: entry.qty, diff: entry.qty - trade.qty },
-          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+          });
         }
         result.qtyFixed++;
       } else {
@@ -245,13 +245,13 @@ export async function backfillClosedPnl(
             data: { pnlUsd: 0, realizedPnlUsd: 0, pnlSource: "PHANTOM" },
           });
           bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: 0 } });
-          logReconciliationEvent(db, {
+          await logReconciliationEvent(db, {
             type: "PHANTOM_PROMOTED",
             tradeId: trade.id,
             symbol,
             message: `Trade #${trade.id} promoted to PHANTOM after ${PHANTOM_GRACE_PERIOD_MS / 60_000}min with no Bybit evidence (held ${holdMs}ms)`,
             details: { holdMs, ageMs: nowMs - closedMs! },
-          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+          });
         }
         result.phantomPromoted++;
         reporter?.onGroupOutcome?.({ kind: "phantomPromoted", symbol, side, trade });

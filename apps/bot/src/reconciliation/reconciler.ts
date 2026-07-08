@@ -398,12 +398,12 @@ export class Reconciler {
 
     if (matched.length === 0) {
       console.warn(`[reconciler] order fill ${order.orderId}: no matching trade for ${order.symbol} (side=${expectedDbSide}, qty=${orderQty})`);
-      logReconciliationEvent(this.db, {
+      await logReconciliationEvent(this.db, {
         type: "FILL_DROPPED",
         symbol: order.symbol,
         message: `Reduce-only fill ${order.orderId} had no matching OPEN/CLOSING trade (side=${expectedDbSide}, qty=${orderQty})`,
         details: { orderId: order.orderId, side: expectedDbSide, qty: orderQty },
-      }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+      });
       return;
     }
     if (matched.length > 1) {
@@ -589,13 +589,13 @@ export class Reconciler {
             data: { status: "CLOSED", pnlSource: "EXEC_FALLBACK", closedAt: now },
           });
           console.warn(`[reconciler] no Bybit record for trade #${trade.id} (${symbol}) at close time — tagged EXEC_FALLBACK, periodic backfill will retry`);
-          logReconciliationEvent(this.db, {
+          await logReconciliationEvent(this.db, {
             type: "NO_CLOSEDPNL_MATCH",
             tradeId: trade.id,
             symbol,
             message: `No Bybit closedPnl/execution evidence for trade #${trade.id} at close time`,
             details: { ageMs: nowMs - trade.openedAt.getTime() },
-          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+          });
           this.bus?.publish({ type: "trade.closed", data: { tradeId: trade.id, botId: trade.botId, symbol, pnlUsd: null } });
         }
       }
@@ -628,13 +628,13 @@ export class Reconciler {
             `is already ${closedTrade.status} (pnlSource=${closedTrade.pnlSource ?? "null"}) cumExecQty=${cumExecQty} ` +
             `— fill NOT recorded (possible qty drift)`
           );
-          logReconciliationEvent(this.db, {
+          await logReconciliationEvent(this.db, {
             type: "FILL_DROPPED",
             tradeId: closedTrade.id,
             symbol: closedTrade.symbol,
             message: `Entry fill for order=${order.orderId} arrived after trade #${closedTrade.id} was already ${closedTrade.status} — fill not recorded`,
             details: { orderId: order.orderId, cumExecQty, tradeStatus: closedTrade.status, pnlSource: closedTrade.pnlSource },
-          }).catch(() => { /* logReconciliationEvent already logs its own failures */ });
+          });
         }
       }
       return;
