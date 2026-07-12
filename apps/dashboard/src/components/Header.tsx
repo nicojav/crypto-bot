@@ -1,4 +1,5 @@
 import type { FC } from "react";
+import { Link, NavLink } from "react-router-dom";
 
 const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -21,14 +22,26 @@ export const Header: FC<HeaderProps> = ({ equityUsd, todayPnl, anyBotEnabled, on
     <header className="sticky top-0 z-50 border-b border-border bg-base/90 backdrop-blur-md">
       <div className="max-w-[1440px] mx-auto px-6 h-16 flex items-center justify-between gap-6">
 
-        {/* Logo */}
-        <div className="flex items-center gap-3 shrink-0">
-          <div className="w-7 h-7 rounded-lg bg-green/15 flex items-center justify-center">
-            <div className="w-2.5 h-2.5 rounded-full bg-green" />
-          </div>
-          <span className="font-semibold text-sm text-text-1 tracking-tight">
-            CryptoBot
-          </span>
+        {/* Logo + nav */}
+        <div className="flex items-center gap-5 shrink-0">
+          <Link to="/" className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-lg bg-green/15 flex items-center justify-center">
+              <div className="w-2.5 h-2.5 rounded-full bg-green" />
+            </div>
+            <span className="font-semibold text-sm text-text-1 tracking-tight">
+              CryptoBot
+            </span>
+          </Link>
+          <nav className="hidden sm:flex items-center gap-4">
+            <NavLink
+              to="/trades"
+              className={({ isActive }) =>
+                `text-sm font-medium transition-colors ${isActive ? "text-text-1" : "text-text-3 hover:text-text-1"}`
+              }
+            >
+              Trades
+            </NavLink>
+          </nav>
         </div>
 
         {/* Equity */}
