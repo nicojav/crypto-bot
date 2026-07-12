@@ -31,6 +31,9 @@ export type Trade = {
   feeOpenUsd: number | null;
   feeCloseUsd: number | null;
   pnlSource: string | null;
+  takeProfitPrice: number | null;
+  stopLossPrice: number | null;
+  tpslSet: boolean;
   status: string;
   openedAt: string;
   closedAt: string | null;

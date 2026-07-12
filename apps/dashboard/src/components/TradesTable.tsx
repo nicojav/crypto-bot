@@ -1,12 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { fetchTrades, type Trade, type Bot } from "../api/client";
-
-const fmtTime = new Intl.DateTimeFormat("en-US", {
-  month: "short", day: "numeric",
-  hour: "2-digit", minute: "2-digit", hour12: false,
-});
-const fmtUsd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
-const fmtQty = new Intl.NumberFormat("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 6 });
+import { fmtTime, fmtUsd, fmtQty, PnlSourceBadge, totalFee, hasFee } from "./tradeBadges";
 
 export function TradesTable() {
   const qc = useQueryClient();
@@ -23,7 +18,12 @@ export function TradesTable() {
     <div className="bg-card border border-border rounded-[14px] flex flex-col overflow-hidden">
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
         <h3 className="font-semibold text-sm text-text-1">Recent trades</h3>
-        <span className="font-mono text-xs text-text-3">{trades.length}</span>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-xs text-text-3">{trades.length}</span>
+          <Link to="/trades" className="text-xs font-medium text-text-3 hover:text-text-1 transition-colors">
+            View all →
+          </Link>
+        </div>
       </div>
 
       <div className="overflow-auto max-h-72 flex-1">
@@ -69,36 +69,12 @@ export function TradesTable() {
                         ? "—"
                         : `${t.pnlUsd >= 0 ? "+" : ""}${fmtUsd.format(t.pnlUsd)}`}
                     </div>
-                    {(t.feeOpenUsd !== null || t.feeCloseUsd !== null) && (
+                    {hasFee(t) && (
                       <div className="font-mono text-[10px] text-text-3 mt-0.5" title="Total fees paid">
-                        fee {fmtUsd.format((t.feeOpenUsd ?? 0) + (t.feeCloseUsd ?? 0))}
+                        fee {fmtUsd.format(totalFee(t))}
                       </div>
                     )}
-                    {t.pnlSource === "EXEC_FALLBACK" && (
-                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Locally estimated from fill price — WS order event missed.">
-                        est.
-                      </span>
-                    )}
-                    {t.pnlSource === "BYBIT_REST" && (
-                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Sourced from Bybit closedPnL REST endpoint.">
-                        rest
-                      </span>
-                    )}
-                    {t.pnlSource === "BYBIT_REST_GROUPED" && (
-                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="PnL is a proportional share of a grouped Bybit closedPnL entry (multiple bot trades aggregated into one Bybit position).">
-                        rest-grouped
-                      </span>
-                    )}
-                    {t.pnlSource === "BYBIT_LIQUIDATION" && (
-                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-red/10 text-red border border-red/20" title="Position was force-closed by the exchange.">
-                        liquidated
-                      </span>
-                    )}
-                    {t.pnlSource === "PHANTOM" && (
-                      <span className="inline-flex mt-0.5 items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-border/40 text-text-3 border border-border" title="Position recorded locally but no execution on Bybit — counted as 0 PnL.">
-                        phantom
-                      </span>
-                    )}
+                    <PnlSourceBadge source={t.pnlSource} className="mt-0.5" />
                   </td>
                 </tr>
               ))}
