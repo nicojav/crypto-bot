@@ -48,39 +48,57 @@ export default function BacktestPage() {
       )}
 
       {result && lastConfig && (
-        <>
-          <BacktestKeyStats stats={result.stats} />
+        <div className="relative">
+          <div className={`space-y-4 transition-opacity ${mutation.isPending ? "opacity-40 pointer-events-none" : ""}`}>
+            <BacktestKeyStats stats={result.stats} />
 
-          <div className="flex items-center gap-1 bg-surface rounded-lg p-1 w-fit">
-            {TABS.map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                className={[
-                  "px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors",
-                  tab === key ? "bg-card text-text-1 shadow-sm" : "text-text-2 hover:text-text-1",
-                ].join(" ")}
-              >
-                {label}
-              </button>
-            ))}
+            <div className="flex items-center gap-1 bg-surface rounded-lg p-1 w-fit">
+              {TABS.map(({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => setTab(key)}
+                  className={[
+                    "px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors",
+                    tab === key ? "bg-card text-text-1 shadow-sm" : "text-text-2 hover:text-text-1",
+                  ].join(" ")}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {tab === "performance" && (
+              <BacktestEquityChart equityCurve={result.equityCurve} buyHoldCurve={result.buyHoldCurve} />
+            )}
+            {tab === "trades" && <BacktestTradesTable trades={result.trades} />}
+            {tab === "analysis" && <BacktestAnalysis stats={result.stats} />}
+            {tab === "chart" && (
+              <BacktestChart
+                symbol={lastConfig.symbol}
+                timeframe={lastConfig.timeframe}
+                from={lastConfig.from}
+                to={lastConfig.to}
+                markers={result.markers}
+              />
+            )}
           </div>
 
-          {tab === "performance" && (
-            <BacktestEquityChart equityCurve={result.equityCurve} buyHoldCurve={result.buyHoldCurve} />
+          {mutation.isPending && (
+            <div className="absolute inset-0 flex items-start justify-center pt-16">
+              <div className="flex items-center gap-2.5 bg-card border border-border rounded-xl px-4 py-2.5 shadow-xl">
+                <Spinner />
+                <span className="text-sm text-text-2">Running backtest…</span>
+              </div>
+            </div>
           )}
-          {tab === "trades" && <BacktestTradesTable trades={result.trades} />}
-          {tab === "analysis" && <BacktestAnalysis stats={result.stats} />}
-          {tab === "chart" && (
-            <BacktestChart
-              symbol={lastConfig.symbol}
-              timeframe={lastConfig.timeframe}
-              from={lastConfig.from}
-              to={lastConfig.to}
-              markers={result.markers}
-            />
-          )}
-        </>
+        </div>
+      )}
+
+      {!result && mutation.isPending && (
+        <div className="bg-card border border-border rounded-[14px] p-10 flex flex-col items-center justify-center gap-3 text-text-3 text-sm">
+          <Spinner />
+          Running backtest — downloading candles and simulating trades…
+        </div>
       )}
 
       {!result && !mutation.isPending && (
@@ -90,4 +108,8 @@ export default function BacktestPage() {
       )}
     </main>
   );
+}
+
+function Spinner() {
+  return <div className="w-5 h-5 border-2 border-border border-t-green rounded-full animate-spin shrink-0" />;
 }
