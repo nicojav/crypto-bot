@@ -41,7 +41,7 @@ graph TB
     DIAG["scripts/dumpClosedPnl.ts<br/>(read-only diagnostic)"] --> BYBIT_REST
     DIAG2["scripts/dumpReconciliationEvents.ts<br/>(read-only diagnostic)"] --> REVENT
 
-    BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, POST optimize,<br/>GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
+    BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, POST optimize,<br/>POST/GET optimize/auto(+cancel/delete),<br/>GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
     CSTORE -->|"getKline (missing ranges only)"| BYBIT_MAINNET["Bybit REST API<br/>(mainnet, public — always real prices,<br/>independent of BYBIT_TESTNET)"]
     CSTORE -->|upsert/read| CANDLE[("Candle")]
     BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets, composable<br/>customMaCross, bbMeanReversion scalper)"]
@@ -49,6 +49,13 @@ graph TB
     BTAPI -->|runOneBacktest, sweep combos| OPT["backtest/optimizer.ts<br/>(param-sweep + shared run helper)"]
     OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick)"]
     ENGINE --> STATS["backtest/stats.ts"]
+
+    BTAPI -->|"detached, single-job lock"| RUNNER["backtest/optimizationRunner.ts<br/>(Strategy Finder background job:<br/>iterates strategy x symbol x timeframe,<br/>yields to the event loop between backtests)"]
+    RUNNER -->|ensureCandles| CSTORE
+    RUNNER -->|searchCell| SEARCH["backtest/search.ts<br/>(coarse grid → refine,<br/>in-sample/out-of-sample split + overfit flag)"]
+    SEARCH -->|runOneBacktest| OPT
+    SEARCH -->|scoreResult| SCORING["backtest/scoring.ts<br/>(Sharpe/Calmar + risk-adjusted<br/>composite score, not raw PnL)"]
+    RUNNER -->|"progress + bounded top-N results"| OPTRUN[("OptimizationRun")]
     DASH -->|REST| BTAPI
 ```
 
@@ -63,6 +70,40 @@ graph TB
    - A separate periodic sweep (every 5min, `runPnlBackfill` → `pnlBackfill.ts`) retries `EXEC_FALLBACK`/null-source trades closed in the last 48h — closing the gap left by the one-shot live attempt above. A single-row trade held under 5s with still no Bybit evidence after a 15-minute grace period is promoted to `PHANTOM` here, once we're confident it's not just indexing lag.
    - Notable anomalies (dropped fills, qty drift, phantom promotions, unmatched lookups) are persisted to `ReconciliationEvent` via `reconciliation/reconciliationLog.ts`, since console logs don't survive Railway's log retention window — query them with `npm run dump:reconciliation-events`.
 4. **Dashboard** reads trade/equity/position state via `routes/api.ts` (REST) and receives live updates over `ws.ts`'s WebSocket server, fed by the internal `eventBus.ts`.
+
+## Strategy Finder (auto strategy/param search)
+
+Brute-forcing every parameter combination for a strategy is infeasible (one strategy can have
+enough numeric params at fine steps to produce billions of combos), and ranking by raw
+in-sample profit reliably surfaces curve-fit configs that don't hold up live. `POST
+/api/backtest/optimize/auto` starts a detached background job (`backtest/optimizationRunner.ts`)
+instead of running inline in the request:
+
+1. It iterates the requested `strategyIds x symbols x timeframes` matrix; each cell fetches
+   candles via `ensureCandles` (cached after the first run) and calls `search.ts`'s
+   `searchCell`.
+2. `searchCell` builds a bounded **coarse grid** honoring each param's schema (enum params
+   expand to their few discrete values; a `showIf`-gated param only varies in branches where
+   its gate holds), scores every combo with `scoring.ts`'s risk-adjusted `scoreResult`
+   (Sharpe/Calmar/profit-factor, not raw PnL%), then **refines** a finer grid around the best
+   regions.
+3. Candles are split into in-sample/out-of-sample chunks up front — the search only ever
+   optimizes on the in-sample slice, then re-runs each finalist on the untouched
+   out-of-sample slice and flags it `overfitFlag: true` if the OOS score collapses relative
+   to IS. This is what makes a result defensible enough to trade, not just a good backtest.
+4. Progress and a bounded top-N ranked result set are persisted to `OptimizationRun` as the
+   run progresses, so `GET /api/backtest/optimize/auto/:runId` can be polled mid-run. A
+   module-level single-job lock (this process also runs live trading) rejects a second run
+   while one is active; `searchCell` yields to the event loop every few backtests so
+   `SignalProcessor`/`Reconciler` keep ticking.
+5. If the process dies mid-run (crash, deploy, a dev-mode file-watcher restart), the row is
+   orphaned at `status: "running"` forever — no live process's in-memory lock ever points at
+   it again, so nothing marks it done. `healOrphanedRuns` sweeps every stuck `"running"` row
+   to `"error"` once at startup (`index.ts`'s `onReady` hook); `POST .../cancel` also
+   self-heals a specific orphaned row on demand (skips the in-memory lock check when no live
+   process owns that id), so cancel always gives the user a way out rather than requiring
+   another restart. `DELETE /api/backtest/optimize/auto/:runId` removes a finished run from
+   history (409s if it's still the active run — cancel it first).
 
 ## Manual scripts
 

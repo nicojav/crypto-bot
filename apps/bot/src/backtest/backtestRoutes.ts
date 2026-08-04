@@ -6,6 +6,8 @@ import { ensureCandles } from "./candleStore.js";
 import { listStrategies, getStrategy } from "./strategies/index.js";
 import type { EquityPoint } from "./engine.js";
 import { countCombinations, generateParamCombinations, runOneBacktest, type SweepParam } from "./optimizer.js";
+import { runAutoOptimization, isOptimizationRunning, cancelRun, getActiveRunId, type AutoOptimizeConfig } from "./optimizationRunner.js";
+import { DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from "./scoring.js";
 import type { Candle } from "./types.js";
 
 const TIMEFRAMES = ["5m", "15m", "4h", "1d", "1w"] as const;
@@ -167,6 +169,48 @@ const optimizeResultSchema = {
   required: ["params", "stats"],
 } as const;
 
+const scoreWeightsSchema = {
+  type: "object",
+  properties: {
+    sharpeWeight: { type: "number" },
+    profitFactorWeight: { type: "number" },
+    pnlWeight: { type: "number" },
+    drawdownPenalty: { type: "number" },
+    minTrades: { type: "number" },
+  },
+} as const;
+
+const cellResultSchema = {
+  type: "object",
+  properties: {
+    strategyId: { type: "string" },
+    symbol: { type: "string" },
+    timeframe: { type: "string" },
+    params: { type: "object", additionalProperties: { type: "number" } },
+    isStats: statsSchema,
+    oosStats: statsSchema,
+    isScore: { type: "number" },
+    oosScore: { type: "number" },
+    overfitFlag: { type: "boolean" },
+  },
+  required: ["strategyId", "symbol", "timeframe", "params", "isStats", "oosStats", "isScore", "oosScore", "overfitFlag"],
+} as const;
+
+const autoOptimizeRunSchema = {
+  type: "object",
+  properties: {
+    id: { type: "integer" },
+    status: { type: "string" }, // running | done | error | cancelled
+    cellsTotal: { type: "integer" },
+    cellsDone: { type: "integer" },
+    backtestsRun: { type: "integer" },
+    error: { type: ["string", "null"] },
+    createdAt: { type: "string" },
+    results: { type: "array", items: cellResultSchema },
+  },
+  required: ["id", "status", "cellsTotal", "cellsDone", "backtestsRun", "createdAt", "results"],
+} as const;
+
 // ── Typed request shapes ──────────────────────────────────────────────────────
 
 interface RunBody {
@@ -206,6 +250,23 @@ interface OptimizeBody {
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   minTrades?: number;
+}
+
+interface AutoOptimizeBody {
+  symbols: string[];
+  timeframes: (typeof TIMEFRAMES)[number][];
+  strategyIds?: string[];
+  from: string;
+  to: string;
+  oosFraction?: number;
+  minTrades?: number;
+  scoreWeights?: Partial<ScoreWeights>;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
 }
 
 function downsample(points: readonly EquityPoint[], maxPoints: number): EquityPoint[] {
@@ -474,6 +535,213 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       filteredOutCount,
       results: evaluated.slice(0, MAX_OPTIMIZE_RESULTS),
     };
+  });
+
+  // POST /api/backtest/optimize/auto
+  // Kicks off the coarse-grid / out-of-sample "Strategy Finder" search across a full
+  // strategy x symbol x timeframe matrix as a detached background job (see
+  // optimizationRunner.ts) — unlike /optimize above, this is NOT bounded to run inline in
+  // the request: it can take minutes and must not block the live trading loop
+  // (SignalProcessor/Reconciler share this process). Returns immediately with a runId to poll.
+  fastify.post<{ Body: AutoOptimizeBody }>("/api/backtest/optimize/auto", {
+    schema: {
+      body: {
+        type: "object",
+        required: ["symbols", "timeframes", "from", "to"],
+        properties: {
+          symbols:           { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
+          timeframes:        { type: "array", items: { type: "string", enum: TIMEFRAMES }, minItems: 1 },
+          strategyIds:       { type: "array", items: { type: "string" } },
+          from:              { type: "string" },
+          to:                { type: "string" },
+          oosFraction:       { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.3 },
+          minTrades:         { type: "integer", minimum: 0, default: 10 },
+          scoreWeights:      scoreWeightsSchema,
+          initialCapital:    { type: "number", exclusiveMinimum: 0, default: 10_000 },
+          maxPositionUsd:    { type: "number", exclusiveMinimum: 0, default: 1_000 },
+          leverage:          { type: "integer", minimum: 1, maximum: 100, default: 5 },
+          feeBps:            { type: "number", minimum: 0, default: 5.5 },
+          slippageBps:       { type: "number", minimum: 0, default: 2 },
+          fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
+        },
+      },
+      response: {
+        200: {
+          type: "object",
+          properties: { runId: { type: "integer" } },
+          required: ["runId"],
+        },
+        400: errorSchema,
+        409: errorSchema,
+        503: errorSchema,
+      },
+    },
+  }, async (req, reply) => {
+    if (!bybit) return reply.status(503).send({ error: "Exchange client not available" });
+    if (isOptimizationRunning()) {
+      return reply.status(409).send({ error: "An optimization run is already active — wait for it to finish or cancel it" });
+    }
+
+    const strategyIds = req.body.strategyIds && req.body.strategyIds.length > 0 ? req.body.strategyIds : listStrategies().map((s) => s.id);
+    for (const id of strategyIds) {
+      if (!getStrategy(id)) return reply.status(400).send({ error: `Unknown strategy: ${id}` });
+    }
+
+    const fromMs = Date.parse(req.body.from);
+    const toMs = Date.parse(req.body.to);
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) {
+      return reply.status(400).send({ error: "Invalid from/to date range" });
+    }
+
+    const config: AutoOptimizeConfig = {
+      symbols: req.body.symbols.map((s) => s.toUpperCase()),
+      timeframes: req.body.timeframes as TimeframeId[],
+      strategyIds,
+      from: req.body.from,
+      to: req.body.to,
+      oosFraction: req.body.oosFraction ?? 0.3,
+      minTrades: req.body.minTrades ?? 10,
+      scoreWeights: { ...DEFAULT_SCORE_WEIGHTS, ...req.body.scoreWeights },
+      engine: {
+        initialCapital: req.body.initialCapital ?? 10_000,
+        maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
+        leverage: req.body.leverage ?? 5,
+        feeBps: req.body.feeBps ?? 5.5,
+        slippageBps: req.body.slippageBps ?? 2,
+        fillModel: req.body.fillModel ?? "signalClose",
+      },
+    };
+
+    const run = await db.optimizationRun.create({
+      data: {
+        status: "running",
+        configJson: JSON.stringify(config),
+        cellsTotal: config.strategyIds.length * config.symbols.length * config.timeframes.length,
+      },
+    });
+
+    // Detached — not awaited. runAutoOptimization owns the row's lifecycle from here
+    // (progress + status updates), including on failure; this catch is a last-resort log
+    // in case it throws before its own try/finally can persist an "error" status.
+    runAutoOptimization(db, bybit, run.id, config).catch((err: unknown) => {
+      fastify.log.error({ err, runId: run.id }, "auto optimization run failed");
+    });
+
+    return { runId: run.id };
+  });
+
+  // GET /api/backtest/optimize/auto/:runId
+  fastify.get<{ Params: { runId: string } }>("/api/backtest/optimize/auto/:runId", {
+    schema: {
+      params: {
+        type: "object",
+        properties: { runId: { type: "string" } },
+        required: ["runId"],
+      },
+      response: { 200: autoOptimizeRunSchema, 404: errorSchema },
+    },
+  }, async (req, reply) => {
+    const run = await db.optimizationRun.findUnique({ where: { id: Number(req.params.runId) } });
+    if (!run) return reply.status(404).send({ error: "Run not found" });
+
+    return {
+      id: run.id,
+      status: run.status,
+      cellsTotal: run.cellsTotal,
+      cellsDone: run.cellsDone,
+      backtestsRun: run.backtestsRun,
+      error: run.error,
+      createdAt: run.createdAt.toISOString(),
+      results: JSON.parse(run.resultsJson),
+    };
+  });
+
+  // GET /api/backtest/optimize/auto — recent run history
+  fastify.get("/api/backtest/optimize/auto", {
+    schema: {
+      response: {
+        200: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "integer" },
+              status: { type: "string" },
+              cellsTotal: { type: "integer" },
+              cellsDone: { type: "integer" },
+              createdAt: { type: "string" },
+            },
+            required: ["id", "status", "cellsTotal", "cellsDone", "createdAt"],
+          },
+        },
+      },
+    },
+  }, async () => {
+    const runs = await db.optimizationRun.findMany({ orderBy: { createdAt: "desc" }, take: 20 });
+    return runs.map((r) => ({ id: r.id, status: r.status, cellsTotal: r.cellsTotal, cellsDone: r.cellsDone, createdAt: r.createdAt.toISOString() }));
+  });
+
+  // POST /api/backtest/optimize/auto/:runId/cancel
+  fastify.post<{ Params: { runId: string } }>("/api/backtest/optimize/auto/:runId/cancel", {
+    schema: {
+      params: {
+        type: "object",
+        properties: { runId: { type: "string" } },
+        required: ["runId"],
+      },
+      response: {
+        200: { type: "object", properties: { cancelled: { type: "boolean" } }, required: ["cancelled"] },
+        404: errorSchema,
+      },
+    },
+  }, async (req, reply) => {
+    const runId = Number(req.params.runId);
+    if (cancelRun(runId)) return { cancelled: true };
+
+    // Not the current process's active run — either it already finished normally, or it's
+    // orphaned: the process that was executing it died (crash, deploy, a `tsx watch` restart)
+    // before reaching its cleanup code, so the row is stuck at "running" forever with no live
+    // process able to signal it (healOrphanedRuns only runs at startup). Self-heal that case
+    // here so cancel always gives the user a way out, not just after another restart.
+    const run = await db.optimizationRun.findUnique({ where: { id: runId } });
+    if (!run) return reply.status(404).send({ error: "Run not found" });
+
+    if (run.status === "running" && getActiveRunId() !== runId) {
+      await db.optimizationRun.update({
+        where: { id: runId },
+        data: { status: "cancelled", error: "Interrupted — no active process was executing this run (likely a server restart)" },
+      });
+      return { cancelled: true };
+    }
+
+    return reply.status(404).send({ error: "Run not active (already finished)" });
+  });
+
+  // DELETE /api/backtest/optimize/auto/:runId — clears a run (and its results) from history.
+  fastify.delete<{ Params: { runId: string } }>("/api/backtest/optimize/auto/:runId", {
+    schema: {
+      params: {
+        type: "object",
+        properties: { runId: { type: "string" } },
+        required: ["runId"],
+      },
+      response: {
+        200: { type: "object", properties: { deleted: { type: "boolean" } }, required: ["deleted"] },
+        404: errorSchema,
+        409: errorSchema,
+      },
+    },
+  }, async (req, reply) => {
+    const runId = Number(req.params.runId);
+    if (getActiveRunId() === runId) {
+      return reply.status(409).send({ error: "This run is still active — cancel it before deleting" });
+    }
+
+    const run = await db.optimizationRun.findUnique({ where: { id: runId } });
+    if (!run) return reply.status(404).send({ error: "Run not found" });
+
+    await db.optimizationRun.delete({ where: { id: runId } });
+    return { deleted: true };
   });
 
   // GET /api/backtest/candles?symbol&timeframe&from&to
