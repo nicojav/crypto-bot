@@ -29,6 +29,9 @@ graph TB
     APP --> KillSwitchDialog["components/KillSwitchDialog.tsx"]
 
     BTP --> BTConfig["components/backtest/BacktestConfig.tsx"]
+    BTConfig --> BTOptimize["components/backtest/BacktestOptimizePanel.tsx<br/>(manual param sweep, 1-3 params)"]
+    BTP --> BTFinder["components/backtest/StrategyFinderPanel.tsx<br/>(auto search: strategy x symbol x timeframe,<br/>polls a background run, IS/OOS + overfit flag)"]
+    BTFinder -.->|"Load into backtest"| BTConfig
     BTP --> BTStats["components/backtest/BacktestKeyStats.tsx"]
     BTP --> BTEquity["components/backtest/BacktestEquityChart.tsx"]
     BTP --> BTTrades["components/backtest/BacktestTradesTable.tsx"]
@@ -36,7 +39,7 @@ graph TB
     BTP --> BTChart["components/backtest/BacktestChart.tsx<br/>(lightweight-charts candles + markers)"]
     BTTrades --> Badges
 
-    BotCard & EquityBreakdown & EquityChart & OpenPositions & SignalsTable & TradesTable & TP & DP & BC & BTConfig & BTP & BTChart -->|"react-query"| CLIENT["api/client.ts<br/>(REST)"]
+    BotCard & EquityBreakdown & EquityChart & OpenPositions & SignalsTable & TradesTable & TP & DP & BC & BTConfig & BTOptimize & BTFinder & BTP & BTChart -->|"react-query"| CLIENT["api/client.ts<br/>(REST)"]
     APP -->|"live updates"| WSHOOK["hooks/useWebSocket.ts"]
 
     CLIENT -->|"GET/POST /api/*"| BOT["apps/bot REST API"]
@@ -49,4 +52,4 @@ graph TB
 - **Live updates** — `hooks/useWebSocket.ts` holds a single WebSocket connection (mounted once, in `App.tsx`) to `apps/bot`'s `ws.ts` server, receiving the same events the backend's internal `EventBus` publishes (`trade.opened`, `trade.closed`, `signal.received`, `balance.updated`, etc.) and invalidating the relevant React Query caches so the UI updates without polling.
 - **Routing** — `App.tsx` renders `Header` + `KillSwitchDialog` globally, and switches between `DashboardPage` (`/`), `TradesPage` (`/trades`), and `BotConfigPage` (`/bots/:id`) via `react-router-dom`.
 - **Trades page** — `TradesPage` (`/trades`, reached via the header nav or the "View all →" link on the dashboard's `TradesTable`) filters trades by bot/date server-side (`/api/trades` params) and by symbol/side/status/source/search client-side, with column sorting, a filter-aware summary bar, expandable per-trade detail, and CSV export. `tradeBadges.tsx` holds the `pnlSource` badge + formatters shared with `TradesTable`.
-- **Backtest page** — `BacktestPage` (`/backtest`) is a data-driven config form (`BacktestConfig`, populated from `/api/backtest/strategies`) that runs a strategy via `POST /api/backtest/run` and renders the result across four tabs: key stats + equity-vs-Buy&Hold curve (`BacktestEquityChart`, cloning `EquityChart`'s recharts pattern), a sortable/exportable trade list (`BacktestTradesTable`, reusing `tradeBadges.tsx`), returns/win-rate analysis (`BacktestAnalysis`), and a candlestick chart with entry/exit markers (`BacktestChart`, the dashboard's only non-recharts chart — uses `lightweight-charts`, lazy-fetching windowed OHLC from `/api/backtest/candles`).
+- **Backtest page** — `BacktestPage` (`/backtest`) has two modes behind a segmented toggle. **Single backtest** is a data-driven config form (`BacktestConfig`, populated from `/api/backtest/strategies`) that runs a strategy via `POST /api/backtest/run` and renders the result across four tabs: key stats + equity-vs-Buy&Hold curve (`BacktestEquityChart`, cloning `EquityChart`'s recharts pattern), a sortable/exportable trade list (`BacktestTradesTable`, reusing `tradeBadges.tsx`), returns/win-rate analysis (`BacktestAnalysis`), and a candlestick chart with entry/exit markers (`BacktestChart`, the dashboard's only non-recharts chart — uses `lightweight-charts`, lazy-fetching windowed OHLC from `/api/backtest/candles`); it also has an inline manual param sweep (`BacktestOptimizePanel`, 1-3 params, ranked by raw PnL%) via `POST /api/backtest/optimize`. **Strategy Finder** (`StrategyFinderPanel`) is the automated counterpart: pick symbols/timeframes/strategies, start a background search via `POST /api/backtest/optimize/auto`, and poll `GET /api/backtest/optimize/auto/:runId` (React Query `refetchInterval`, active only while the run's `status` is `"running"`) for progress and a results table ranked by out-of-sample score, with in-sample-vs-OOS columns and an overfit flag per row. Its "Load" action hands the chosen strategy/params/symbol/timeframe to `BacktestConfig` (a `prefill` prop keyed by an incrementing token, applied by adjusting state during render rather than via an effect) and switches back to the Single backtest tab.

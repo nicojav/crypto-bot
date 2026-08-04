@@ -36,12 +36,26 @@ const toDateInput = (d: Date) => d.toISOString().slice(0, 10);
 const defaultFrom = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 5); return toDateInput(d); };
 const defaultTo = () => toDateInput(new Date());
 
+// A "load these params into the form" request from another panel (e.g. Strategy Finder).
+// `token` is bumped by the caller on every load so the effect below re-applies even when
+// the exact same strategy/symbol is loaded twice in a row.
+export interface BacktestConfigPrefill {
+  token: number;
+  strategyId: string;
+  params: Record<string, number>;
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  from: string; // ISO
+  to: string; // ISO
+}
+
 interface BacktestConfigProps {
   onRun: (config: BacktestRunConfig) => void;
   isRunning: boolean;
+  prefill?: BacktestConfigPrefill | null;
 }
 
-export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) => {
+export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, prefill }) => {
   const { data: strategies = [] } = useQuery({ queryKey: ["backtest", "strategies"], queryFn: fetchBacktestStrategies, staleTime: Infinity });
   const { data: bots = [] } = useQuery<Bot[]>({ queryKey: ["bots"], queryFn: fetchBots, staleTime: 30_000 });
   const botSymbols = [...new Set(bots.map((b) => b.symbol))].sort();
@@ -78,6 +92,24 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) =>
       symbolDefaultedFromBot.current = true;
     }
   }, [botSymbols]);
+
+  // Apply a "load into backtest" request from the Strategy Finder panel — keyed on `token`
+  // so re-loading the same result still re-applies it (params/dates may have been edited
+  // since). Adjusted during render (React's recommended pattern for "state that depends on
+  // a prop changing"), not in an effect: an effect would render once with stale values,
+  // commit, then re-render with the prefilled ones — a visible flash and an extra render
+  // pass for no benefit, since this isn't synchronizing with anything external.
+  const [appliedPrefillToken, setAppliedPrefillToken] = useState<number | null>(null);
+  if (prefill && prefill.token !== appliedPrefillToken) {
+    setAppliedPrefillToken(prefill.token);
+    setStrategyId(prefill.strategyId);
+    setParams(prefill.params);
+    setSymbol(prefill.symbol);
+    setTimeframe(prefill.timeframe);
+    setFrom(toDateInput(new Date(prefill.from)));
+    setTo(toDateInput(new Date(prefill.to)));
+    symbolDefaultedFromBot.current = true; // don't let the bot-symbol default clobber this afterward
+  }
 
   const strategy = strategies.find((s) => s.id === strategyId);
   // Free-text symbol: any Bybit symbol can be typed. Datalist just offers convenient presets.
@@ -214,15 +246,14 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) =>
       </div>
 
       <div className="flex justify-end items-center gap-3 pt-1">
-        {strategy?.supportsPine && (
-          <button
-            onClick={handleCopyPine}
-            disabled={isCopyingPine}
-            className="px-4 py-2.5 rounded-xl text-sm font-medium bg-surface border border-border text-text-2 hover:text-text-1 hover:border-border-bright transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {isCopyingPine ? "Generating…" : "Copy as Pine Script"}
-          </button>
-        )}
+        <button
+          onClick={() => { void handleCopyPine(); }}
+          disabled={!strategy?.supportsPine || isCopyingPine}
+          title={strategy && !strategy.supportsPine ? `${strategy.label} doesn't support Pine export` : undefined}
+          className="px-4 py-2.5 rounded-xl text-sm font-medium bg-surface border border-border text-text-2 hover:text-text-1 hover:border-border-bright transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {isCopyingPine ? "Generating…" : "Copy as Pine Script"}
+        </button>
         <button
           onClick={handleRun}
           disabled={isRunning || !strategyId || !symbol}

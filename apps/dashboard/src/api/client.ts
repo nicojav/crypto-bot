@@ -99,10 +99,13 @@ export type BotEvent =
   | { type: "ws.reconnected"; data: { disconnectedMs: number } };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  // Only set Content-Type when there's an actual body — Fastify's default JSON body parser
+  // rejects a bodyless request that claims application/json (FST_ERR_CTP_EMPTY_JSON_BODY),
+  // which broke every bodyless POST (e.g. the optimize/auto cancel and kill-switch routes).
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
       Authorization: `Bearer ${TOKEN}`,
       ...(init?.headers ?? {}),
     },
@@ -303,3 +306,73 @@ export const runBacktestOptimize = (body: {
   fillModel?: "signalClose" | "nextOpen";
   minTrades?: number;
 }) => req<BacktestOptimizeResponse>("/api/backtest/optimize", { method: "POST", body: JSON.stringify(body) });
+
+// ── Strategy Finder (auto strategy/param search) ────────────────────────────
+
+export type ScoreWeights = {
+  sharpeWeight: number;
+  profitFactorWeight: number;
+  pnlWeight: number;
+  drawdownPenalty: number;
+  minTrades: number;
+};
+
+export type AutoOptimizeCellResult = {
+  strategyId: string;
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  params: Record<string, number>;
+  isStats: BacktestStats;
+  oosStats: BacktestStats;
+  isScore: number;
+  oosScore: number;
+  overfitFlag: boolean;
+};
+
+export type AutoOptimizeRunStatus = "running" | "done" | "error" | "cancelled";
+
+export type AutoOptimizeRun = {
+  id: number;
+  status: AutoOptimizeRunStatus;
+  cellsTotal: number;
+  cellsDone: number;
+  backtestsRun: number;
+  error: string | null;
+  createdAt: string;
+  results: AutoOptimizeCellResult[];
+};
+
+export type AutoOptimizeRunSummary = {
+  id: number;
+  status: AutoOptimizeRunStatus;
+  cellsTotal: number;
+  cellsDone: number;
+  createdAt: string;
+};
+
+export const startAutoOptimize = (body: {
+  symbols: string[];
+  timeframes: BacktestTimeframe[];
+  strategyIds?: string[];
+  from: string;
+  to: string;
+  oosFraction?: number;
+  minTrades?: number;
+  scoreWeights?: Partial<ScoreWeights>;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+}) => req<{ runId: number }>("/api/backtest/optimize/auto", { method: "POST", body: JSON.stringify(body) });
+
+export const getAutoOptimizeRun = (runId: number) => req<AutoOptimizeRun>(`/api/backtest/optimize/auto/${runId}`);
+
+export const listAutoOptimizeRuns = () => req<AutoOptimizeRunSummary[]>("/api/backtest/optimize/auto");
+
+export const cancelAutoOptimizeRun = (runId: number) =>
+  req<{ cancelled: boolean }>(`/api/backtest/optimize/auto/${runId}/cancel`, { method: "POST" });
+
+export const deleteAutoOptimizeRun = (runId: number) =>
+  req<{ deleted: boolean }>(`/api/backtest/optimize/auto/${runId}`, { method: "DELETE" });
