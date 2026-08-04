@@ -275,3 +275,31 @@ export const fetchBacktestCandles = (params: { symbol: string; timeframe: Backte
   const q = new URLSearchParams({ symbol: params.symbol, timeframe: params.timeframe, from: params.from, to: params.to });
   return req<{ candles: BacktestCandle[]; truncated: boolean; totalAvailable: number }>(`/api/backtest/candles?${q}`);
 };
+
+export type OptimizeSweepParam = { param: string; min: number; max: number; step: number };
+
+export type BacktestOptimizeResult = { params: Record<string, number>; stats: BacktestStats };
+
+export type BacktestOptimizeResponse = {
+  totalCombinations: number;
+  evaluatedCombinations: number;
+  filteredOutCount: number;
+  results: BacktestOptimizeResult[];
+};
+
+export const runBacktestOptimize = (body: {
+  strategyId: string;
+  baseParams: Record<string, number>;
+  sweep: OptimizeSweepParam[];
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  from: string;
+  to: string;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+  minTrades?: number;
+}) => req<BacktestOptimizeResponse>("/api/backtest/optimize", { method: "POST", body: JSON.stringify(body) });

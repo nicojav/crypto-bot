@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { fetchBacktestStrategies, fetchBacktestPine, fetchBots, type BacktestTimeframe, type BacktestStrategyParam, type Bot } from "../../api/client";
 import { Select } from "../ui/Select";
 import { Field } from "../ui/Field";
+import { BacktestOptimizePanel } from "./BacktestOptimizePanel";
 
 // One-click suggestions for the free-text symbol field — not a constraint, any symbol can be typed.
 const SUGGESTED_SYMBOLS = ["BTCUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT", "DOGEUSDT"];
@@ -105,22 +106,24 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) =>
     }
   }
 
+  // Shared execution config, reused by both "Run backtest" and the optimizer panel.
+  const runConfigBase = {
+    strategyId,
+    symbol,
+    timeframe,
+    from: new Date(`${from}T00:00:00Z`).toISOString(),
+    to: new Date(`${to}T23:59:59Z`).toISOString(),
+    initialCapital: Number(initialCapital) || 10_000,
+    maxPositionUsd: Number(maxPositionUsd) || 1_000,
+    leverage: Number(leverage) || 5,
+    feeBps: Number(feeBps) || 0,
+    slippageBps: Number(slippageBps) || 0,
+    fillModel,
+  };
+
   function handleRun() {
     if (!strategyId || !symbol) return;
-    onRun({
-      strategyId,
-      params,
-      symbol,
-      timeframe,
-      from: new Date(`${from}T00:00:00Z`).toISOString(),
-      to: new Date(`${to}T23:59:59Z`).toISOString(),
-      initialCapital: Number(initialCapital) || 10_000,
-      maxPositionUsd: Number(maxPositionUsd) || 1_000,
-      leverage: Number(leverage) || 5,
-      feeBps: Number(feeBps) || 0,
-      slippageBps: Number(slippageBps) || 0,
-      fillModel,
-    });
+    onRun({ ...runConfigBase, params });
   }
 
   return (
@@ -167,6 +170,15 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) =>
                 onChange={(v) => setParams((prev) => ({ ...prev, [p.name]: v }))}
               />
             ))}
+          </div>
+
+          <div className="mt-4">
+            <BacktestOptimizePanel
+              sweepableParams={visibleParams.filter((p) => !p.options)}
+              baseParams={params}
+              runConfigBase={runConfigBase}
+              onApplyParams={(applied) => setParams((prev) => ({ ...prev, ...applied }))}
+            />
           </div>
         </div>
       )}
