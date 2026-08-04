@@ -12,7 +12,7 @@ graph TB
     WH -->|creates PENDING| SIGNAL[("Signal")]
 
     SIGNAL --> SP["processor/signalProcessor.ts<br/>(polls every 500ms)"]
-    SP -->|placeMarketOrder / getOrderFill| BYBIT_REST["Bybit REST API"]
+    SP -->|placeMarketOrder / getOrderFill| BYBIT_REST["Bybit REST API<br/>(account-scoped, testnet-aware)"]
     SP -->|creates/updates| TRADE[("Trade")]
     SP -. "publishes signal/trade events" .-> BUS
 
@@ -40,6 +40,15 @@ graph TB
     CLI["scripts/backfillRealizedPnlGrouped.ts<br/>(manual CLI)"] --> PNLB
     DIAG["scripts/dumpClosedPnl.ts<br/>(read-only diagnostic)"] --> BYBIT_REST
     DIAG2["scripts/dumpReconciliationEvents.ts<br/>(read-only diagnostic)"] --> REVENT
+
+    BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
+    CSTORE -->|"getKline (missing ranges only)"| BYBIT_MAINNET["Bybit REST API<br/>(mainnet, public — always real prices,<br/>independent of BYBIT_TESTNET)"]
+    CSTORE -->|upsert/read| CANDLE[("Candle")]
+    BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets + composable customMaCross)"]
+    STRAT -->|toPine| PINEGEN["backtest/strategies/pineExport.ts"]
+    BTAPI -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick)"]
+    ENGINE --> STATS["backtest/stats.ts"]
+    DASH -->|REST| BTAPI
 ```
 
 ## Signal → Trade lifecycle

@@ -28,9 +28,11 @@ graph LR
         WH[Webhook + REST API] --> CORE[Signal Processor + Reconciler]
         CORE --> TDB[(SQLite / Prisma)]
         CORE --> BUS[EventBus] --> WSS[WS server]
+        BT[Backtest Engine] --> TDB
     end
 
-    CORE <-->|REST + private WS| BYBIT[Bybit Exchange]
+    CORE <-->|"REST + private WS (account, testnet-aware)"| BYBIT[Bybit Exchange]
+    BT -->|"REST kline history (mainnet, public — independent of testnet mode)"| BYBIT
 
     DASH["apps/dashboard — React"] -->|REST /api/*| WH
     WSS -->|live trade/signal events| DASH
