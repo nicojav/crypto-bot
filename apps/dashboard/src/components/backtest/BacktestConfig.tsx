@@ -1,4 +1,4 @@
-import { useEffect, useState, type FC } from "react";
+import { useEffect, useRef, useState, type FC } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { fetchBacktestStrategies, fetchBacktestPine, fetchBots, type BacktestTimeframe, type BacktestStrategyParam, type Bot } from "../../api/client";
@@ -47,7 +47,8 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) =>
 
   const [strategyId, setStrategyId] = useState("");
   const [params, setParams] = useState<Record<string, number>>({});
-  const [symbol, setSymbol] = useState("");
+  const [symbol, setSymbol] = useState("BTCUSDT");
+  const symbolDefaultedFromBot = useRef(false);
   const [timeframe, setTimeframe] = useState<BacktestTimeframe>("1d");
   const [isCopyingPine, setIsCopyingPine] = useState(false);
   const [from, setFrom] = useState(defaultFrom);
@@ -68,9 +69,14 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) =>
     }
   }, [strategies, strategyId]);
 
+  // Preselect the user's actual bot symbol once, the first time bot data arrives — never
+  // again after that, so it doesn't fight the user editing/clearing the field afterward.
   useEffect(() => {
-    if (!symbol) setSymbol(botSymbols[0] ?? "BTCUSDT");
-  }, [botSymbols, symbol]);
+    if (!symbolDefaultedFromBot.current && botSymbols.length > 0) {
+      setSymbol(botSymbols[0]!);
+      symbolDefaultedFromBot.current = true;
+    }
+  }, [botSymbols]);
 
   const strategy = strategies.find((s) => s.id === strategyId);
   // Free-text symbol: any Bybit symbol can be typed. Datalist just offers convenient presets.
