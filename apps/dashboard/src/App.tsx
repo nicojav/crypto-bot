@@ -8,6 +8,7 @@ import { KillSwitchDialog } from "./components/KillSwitchDialog";
 import DashboardPage from "./pages/DashboardPage";
 import BotConfigPage from "./pages/BotConfigPage";
 import TradesPage from "./pages/TradesPage";
+import BacktestPage from "./pages/BacktestPage";
 
 const todayMidnight = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
 
@@ -47,6 +48,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/trades" element={<TradesPage />} />
+        <Route path="/backtest" element={<BacktestPage />} />
         <Route path="/bots/:id" element={<BotConfigPage />} />
       </Routes>
 

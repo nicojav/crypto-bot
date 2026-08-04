@@ -1,0 +1,244 @@
+import { useEffect, useState, type FC } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { fetchBacktestStrategies, fetchBacktestPine, fetchBots, type BacktestTimeframe, type BacktestStrategyParam, type Bot } from "../../api/client";
+import { Select } from "../ui/Select";
+import { Field } from "../ui/Field";
+
+// One-click suggestions for the free-text symbol field — not a constraint, any symbol can be typed.
+const SUGGESTED_SYMBOLS = ["BTCUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT", "DOGEUSDT"];
+
+export interface BacktestRunConfig {
+  strategyId: string;
+  params: Record<string, number>;
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  from: string;
+  to: string;
+  initialCapital: number;
+  maxPositionUsd: number;
+  leverage: number;
+  feeBps: number;
+  slippageBps: number;
+  fillModel: "signalClose" | "nextOpen";
+}
+
+const TIMEFRAMES: { value: BacktestTimeframe; label: string }[] = [
+  { value: "5m", label: "5 minutes" },
+  { value: "15m", label: "15 minutes" },
+  { value: "4h", label: "4 hours" },
+  { value: "1d", label: "1 day" },
+  { value: "1w", label: "1 week" },
+];
+
+const toDateInput = (d: Date) => d.toISOString().slice(0, 10);
+const defaultFrom = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 5); return toDateInput(d); };
+const defaultTo = () => toDateInput(new Date());
+
+interface BacktestConfigProps {
+  onRun: (config: BacktestRunConfig) => void;
+  isRunning: boolean;
+}
+
+export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning }) => {
+  const { data: strategies = [] } = useQuery({ queryKey: ["backtest", "strategies"], queryFn: fetchBacktestStrategies, staleTime: Infinity });
+  const { data: bots = [] } = useQuery<Bot[]>({ queryKey: ["bots"], queryFn: fetchBots, staleTime: 30_000 });
+  const botSymbols = [...new Set(bots.map((b) => b.symbol))].sort();
+
+  const [strategyId, setStrategyId] = useState("");
+  const [params, setParams] = useState<Record<string, number>>({});
+  const [symbol, setSymbol] = useState("");
+  const [timeframe, setTimeframe] = useState<BacktestTimeframe>("1d");
+  const [isCopyingPine, setIsCopyingPine] = useState(false);
+  const [from, setFrom] = useState(defaultFrom);
+  const [to, setTo] = useState(defaultTo);
+  const [initialCapital, setInitialCapital] = useState("10000");
+  const [maxPositionUsd, setMaxPositionUsd] = useState("1000");
+  const [leverage, setLeverage] = useState("5");
+  const [feeBps, setFeeBps] = useState("5.5");
+  const [slippageBps, setSlippageBps] = useState("2");
+  const [fillModel, setFillModel] = useState<"signalClose" | "nextOpen">("signalClose");
+
+  // Select the first strategy/symbol once data loads, and reset params to that strategy's defaults.
+  useEffect(() => {
+    if (!strategyId && strategies.length > 0) {
+      const first = strategies[0]!;
+      setStrategyId(first.id);
+      setParams(Object.fromEntries(first.params.map((p) => [p.name, p.default])));
+    }
+  }, [strategies, strategyId]);
+
+  useEffect(() => {
+    if (!symbol) setSymbol(botSymbols[0] ?? "BTCUSDT");
+  }, [botSymbols, symbol]);
+
+  const strategy = strategies.find((s) => s.id === strategyId);
+  // Free-text symbol: any Bybit symbol can be typed. Datalist just offers convenient presets.
+  const symbolSuggestions = [...new Set([...botSymbols, ...SUGGESTED_SYMBOLS])].sort();
+  const visibleParams = (strategy?.params ?? []).filter(
+    (p) => !p.showIf || params[p.showIf.param] === p.showIf.equals,
+  );
+
+  function handleStrategyChange(id: string) {
+    setStrategyId(id);
+    const next = strategies.find((s) => s.id === id);
+    if (next) setParams(Object.fromEntries(next.params.map((p) => [p.name, p.default])));
+  }
+
+  async function handleCopyPine() {
+    if (!strategy) return;
+    setIsCopyingPine(true);
+    try {
+      const { pine } = await fetchBacktestPine(strategy.id, params);
+      await navigator.clipboard.writeText(pine);
+      toast.success("Pine script copied to clipboard");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to generate Pine script");
+    } finally {
+      setIsCopyingPine(false);
+    }
+  }
+
+  function handleRun() {
+    if (!strategyId || !symbol) return;
+    onRun({
+      strategyId,
+      params,
+      symbol,
+      timeframe,
+      from: new Date(`${from}T00:00:00Z`).toISOString(),
+      to: new Date(`${to}T23:59:59Z`).toISOString(),
+      initialCapital: Number(initialCapital) || 10_000,
+      maxPositionUsd: Number(maxPositionUsd) || 1_000,
+      leverage: Number(leverage) || 5,
+      feeBps: Number(feeBps) || 0,
+      slippageBps: Number(slippageBps) || 0,
+      fillModel,
+    });
+  }
+
+  return (
+    <div className="bg-card border border-border rounded-[14px] p-5 space-y-5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+        <div className="flex flex-col gap-1.5 min-w-0 col-span-2">
+          <label className="data-label">Strategy</label>
+          <Select
+            value={strategyId}
+            onChange={handleStrategyChange}
+            options={strategies.map((s) => ({ value: s.id, label: s.label }))}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <label className="data-label">Symbol</label>
+          <input
+            type="text"
+            list="backtest-symbol-suggestions"
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value.toUpperCase().trim())}
+            placeholder="e.g. BTCUSDT"
+            className="bg-surface border border-border rounded-xl px-4 py-2.5 text-sm font-mono text-text-1 placeholder:text-text-3 focus:outline-none focus:border-border-bright transition-colors"
+          />
+          <datalist id="backtest-symbol-suggestions">
+            {symbolSuggestions.map((s) => <option key={s} value={s} />)}
+          </datalist>
+        </div>
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <label className="data-label">Timeframe</label>
+          <Select value={timeframe} onChange={(v) => setTimeframe(v as BacktestTimeframe)} options={TIMEFRAMES} />
+        </div>
+      </div>
+
+      {strategy && (
+        <div>
+          <div className="data-label mb-2">{strategy.label} parameters</div>
+          <p className="text-xs text-text-3 mb-3">{strategy.description}</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {visibleParams.map((p) => (
+              <ParamField
+                key={p.name}
+                param={p}
+                value={params[p.name] ?? p.default}
+                onChange={(v) => setParams((prev) => ({ ...prev, [p.name]: v }))}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div className="data-label mb-2">Backtest window</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Field label="From" type="date" value={from} onChange={setFrom} />
+          <Field label="To" type="date" value={to} onChange={setTo} />
+        </div>
+      </div>
+
+      <div>
+        <div className="data-label mb-2">Execution</div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <Field label="Initial capital" type="number" min="0" value={initialCapital} onChange={setInitialCapital} hint="USDT" />
+          <Field label="Margin / trade" type="number" min="0" value={maxPositionUsd} onChange={setMaxPositionUsd} hint="USDT" />
+          <Field label="Leverage" type="number" min="1" value={leverage} onChange={setLeverage} hint="x" />
+          <Field label="Taker fee" type="number" min="0" step="0.1" value={feeBps} onChange={setFeeBps} hint="bps" />
+          <Field label="Slippage" type="number" min="0" step="0.1" value={slippageBps} onChange={setSlippageBps} hint="bps" />
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <label className="data-label">Fill model</label>
+            <Select
+              value={fillModel}
+              onChange={(v) => setFillModel(v as "signalClose" | "nextOpen")}
+              options={[
+                { value: "signalClose", label: "Signal close (live-bot parity)" },
+                { value: "nextOpen", label: "Next bar open (TradingView parity)" },
+              ]}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex justify-end items-center gap-3 pt-1">
+        {strategy?.supportsPine && (
+          <button
+            onClick={handleCopyPine}
+            disabled={isCopyingPine}
+            className="px-4 py-2.5 rounded-xl text-sm font-medium bg-surface border border-border text-text-2 hover:text-text-1 hover:border-border-bright transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isCopyingPine ? "Generating…" : "Copy as Pine Script"}
+          </button>
+        )}
+        <button
+          onClick={handleRun}
+          disabled={isRunning || !strategyId || !symbol}
+          className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-green text-base hover:bg-green/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {isRunning ? "Running…" : "Run backtest"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// Renders a numeric Field, or a Select (index ↔ label) when the param declares `options`.
+const ParamField: FC<{ param: BacktestStrategyParam; value: number; onChange: (v: number) => void }> = ({ param, value, onChange }) => {
+  if (param.options) {
+    return (
+      <div className="flex flex-col gap-1.5 min-w-0">
+        <label className="data-label">{param.label}</label>
+        <Select
+          value={String(value)}
+          onChange={(v) => onChange(Number(v))}
+          options={param.options.map((label, idx) => ({ value: String(idx), label }))}
+        />
+      </div>
+    );
+  }
+  return (
+    <Field
+      label={param.label}
+      type="number"
+      min={String(param.min)}
+      step={String(param.step)}
+      value={String(value)}
+      onChange={(v) => onChange(Number(v))}
+    />
+  );
+};

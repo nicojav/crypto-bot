@@ -173,3 +173,105 @@ export const fetchSignals = (params?: { botId?: number; limit?: number }) => {
 
 export const postKillSwitch = () =>
   req<{ disabled: number }>("/api/kill-switch", { method: "POST" });
+
+// ── Backtesting ────────────────────────────────────────────────────────────
+
+export type BacktestTimeframe = "5m" | "15m" | "4h" | "1d" | "1w";
+
+export type BacktestStrategyParam = {
+  name: string;
+  label: string;
+  default: number;
+  min: number;
+  max: number;
+  step: number;
+  /** When present, render as a select — the value is still a number (index into this list). */
+  options?: string[];
+  /** Only show this param when `params[showIf.param] === showIf.equals`. */
+  showIf?: { param: string; equals: number };
+};
+
+export type BacktestStrategy = {
+  id: string;
+  label: string;
+  description: string;
+  params: BacktestStrategyParam[];
+  supportsPine: boolean;
+};
+
+export type BacktestTrade = {
+  entryTime: number;
+  exitTime: number;
+  side: "BUY" | "SELL";
+  entryPrice: number;
+  exitPrice: number;
+  qty: number;
+  sizeUsd: number;
+  pnlUsd: number;
+  pnlPct: number;
+  feeUsd: number;
+  barsHeld: number;
+  exitReason: "tp" | "sl" | "reversal" | "windowEnd";
+};
+
+export type BacktestEquityPoint = { time: number; equity: number };
+
+export type BacktestHistogramBin = { rangeStart: number; rangeEnd: number; count: number };
+
+export type BacktestStats = {
+  totalPnlUsd: number;
+  totalPnlPct: number;
+  maxDrawdownUsd: number;
+  maxDrawdownPct: number;
+  totalTrades: number;
+  winners: number;
+  losers: number;
+  breakevens: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  avgPnlUsd: number;
+  avgPnlPct: number;
+  avgBarsHeld: number;
+  largestProfitUsd: number;
+  largestLossUsd: number;
+  avgProfitPct: number;
+  avgLossPct: number;
+  returnsHistogram: BacktestHistogramBin[];
+};
+
+export type BacktestMarker = { time: number; price: number; kind: "long" | "short" | "exit"; exitReason?: string };
+
+export type BacktestRunResult = {
+  stats: BacktestStats;
+  trades: BacktestTrade[];
+  equityCurve: BacktestEquityPoint[];
+  buyHoldCurve: BacktestEquityPoint[];
+  markers: BacktestMarker[];
+};
+
+export type BacktestCandle = { openTime: number; open: number; high: number; low: number; close: number; volume: number };
+
+export const fetchBacktestStrategies = () => req<BacktestStrategy[]>("/api/backtest/strategies");
+
+export const fetchBacktestPine = (strategyId: string, params: Record<string, number>) =>
+  req<{ pine: string }>(`/api/backtest/strategies/${strategyId}/pine`, { method: "POST", body: JSON.stringify({ params }) });
+
+export const runBacktest = (body: {
+  strategyId: string;
+  params: Record<string, number>;
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  from: string;
+  to: string;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+}) => req<BacktestRunResult>("/api/backtest/run", { method: "POST", body: JSON.stringify(body) });
+
+export const fetchBacktestCandles = (params: { symbol: string; timeframe: BacktestTimeframe; from: string; to: string }) => {
+  const q = new URLSearchParams({ symbol: params.symbol, timeframe: params.timeframe, from: params.from, to: params.to });
+  return req<{ candles: BacktestCandle[]; truncated: boolean; totalAvailable: number }>(`/api/backtest/candles?${q}`);
+};
