@@ -4,13 +4,15 @@ import type { BybitClient, TimeframeId } from "../exchange/bybit.js";
 import { env } from "../env.js";
 import { ensureCandles } from "./candleStore.js";
 import { listStrategies, getStrategy } from "./strategies/index.js";
-import { runBacktestEngine, type EquityPoint } from "./engine.js";
-import { computeStats } from "./stats.js";
+import type { EquityPoint } from "./engine.js";
+import { countCombinations, generateParamCombinations, runOneBacktest, type SweepParam } from "./optimizer.js";
 import type { Candle } from "./types.js";
 
 const TIMEFRAMES = ["5m", "15m", "4h", "1d", "1w"] as const;
 const MAX_CANDLES_PER_REQUEST = 5_000;
 const MAX_CURVE_POINTS = 1_500;
+const MAX_OPTIMIZE_COMBINATIONS = 500;
+const MAX_OPTIMIZE_RESULTS = 50;
 
 // ── Shared schemas ────────────────────────────────────────────────────────────
 
@@ -145,6 +147,26 @@ const errorSchema = {
   properties: { error: { type: "string" } },
 } as const;
 
+const optimizeSweepParamSchema = {
+  type: "object",
+  properties: {
+    param: { type: "string" },
+    min: { type: "number" },
+    max: { type: "number" },
+    step: { type: "number", exclusiveMinimum: 0 },
+  },
+  required: ["param", "min", "max", "step"],
+} as const;
+
+const optimizeResultSchema = {
+  type: "object",
+  properties: {
+    params: { type: "object", additionalProperties: { type: "number" } },
+    stats: statsSchema,
+  },
+  required: ["params", "stats"],
+} as const;
+
 // ── Typed request shapes ──────────────────────────────────────────────────────
 
 interface RunBody {
@@ -167,6 +189,23 @@ interface CandlesQuery {
   timeframe: (typeof TIMEFRAMES)[number];
   from: string;
   to: string;
+}
+
+interface OptimizeBody {
+  strategyId: string;
+  baseParams: Record<string, number>;
+  sweep: SweepParam[];
+  symbol: string;
+  timeframe: (typeof TIMEFRAMES)[number];
+  from: string;
+  to: string;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+  minTrades?: number;
 }
 
 function downsample(points: readonly EquityPoint[], maxPoints: number): EquityPoint[] {
@@ -300,8 +339,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     const instrument = await bybit.getInstrumentInfo(symbol);
     const params = { ...Object.fromEntries(strategy.params.map((p) => [p.name, p.default])), ...req.body.params };
 
-    const signals = strategy.run(candles, params);
-    const { trades, equityCurve, buyHoldCurve } = runBacktestEngine(candles, signals, {
+    const { trades, equityCurve, buyHoldCurve, stats } = runOneBacktest(strategy, candles, params, {
       initialCapital: req.body.initialCapital ?? 10_000,
       maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
       leverage: req.body.leverage ?? 5,
@@ -311,8 +349,6 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       lotSize: instrument.lotSize,
       tickSize: instrument.tickSize,
     });
-
-    const stats = computeStats(trades, equityCurve, req.body.initialCapital ?? 10_000);
 
     const markers = trades.flatMap((t) => [
       { time: t.entryTime, price: t.entryPrice, kind: t.side === "BUY" ? "long" : "short" },
@@ -325,6 +361,118 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       equityCurve: downsample(equityCurve, MAX_CURVE_POINTS),
       buyHoldCurve: downsample(buyHoldCurve, MAX_CURVE_POINTS),
       markers,
+    };
+  });
+
+  // POST /api/backtest/optimize
+  // Sweeps 1-3 numeric params over a range/step (everything else fixed at baseParams),
+  // fetching candles once and reusing them across every combination. Ranked by Total PnL%,
+  // excluding combinations with too few trades to be statistically meaningful.
+  fastify.post<{ Body: OptimizeBody }>("/api/backtest/optimize", {
+    schema: {
+      body: {
+        type: "object",
+        required: ["strategyId", "symbol", "timeframe", "from", "to", "sweep"],
+        properties: {
+          strategyId:        { type: "string" },
+          baseParams:        { type: "object", additionalProperties: { type: "number" }, default: {} },
+          sweep:             { type: "array", items: optimizeSweepParamSchema, minItems: 1, maxItems: 3 },
+          symbol:            { type: "string", minLength: 1 },
+          timeframe:         { type: "string", enum: TIMEFRAMES },
+          from:              { type: "string" },
+          to:                { type: "string" },
+          initialCapital:    { type: "number", exclusiveMinimum: 0, default: 10_000 },
+          maxPositionUsd:    { type: "number", exclusiveMinimum: 0, default: 1_000 },
+          leverage:          { type: "integer", minimum: 1, maximum: 100, default: 5 },
+          feeBps:            { type: "number", minimum: 0, default: 5.5 },
+          slippageBps:       { type: "number", minimum: 0, default: 2 },
+          fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
+          minTrades:         { type: "integer", minimum: 0, default: 10 },
+        },
+      },
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            totalCombinations: { type: "integer" },
+            evaluatedCombinations: { type: "integer" },
+            filteredOutCount: { type: "integer" },
+            results: { type: "array", items: optimizeResultSchema },
+          },
+          required: ["totalCombinations", "evaluatedCombinations", "filteredOutCount", "results"],
+        },
+        400: errorSchema,
+        503: errorSchema,
+      },
+    },
+  }, async (req, reply) => {
+    if (!bybit) return reply.status(503).send({ error: "Exchange client not available" });
+
+    const strategy = getStrategy(req.body.strategyId);
+    if (!strategy) return reply.status(400).send({ error: `Unknown strategy: ${req.body.strategyId}` });
+
+    const validParamNames = new Set(strategy.params.map((p) => p.name));
+    for (const s of req.body.sweep) {
+      if (!validParamNames.has(s.param)) {
+        return reply.status(400).send({ error: `Unknown param "${s.param}" for strategy "${strategy.id}"` });
+      }
+    }
+
+    const totalCombinations = countCombinations(req.body.sweep);
+    if (totalCombinations > MAX_OPTIMIZE_COMBINATIONS) {
+      return reply.status(400).send({
+        error: `Sweep would run ${totalCombinations} combinations — narrow the range/step to ${MAX_OPTIMIZE_COMBINATIONS} or fewer.`,
+      });
+    }
+
+    const symbol = req.body.symbol.toUpperCase();
+    const timeframe = req.body.timeframe as TimeframeId;
+    const fromMs = Date.parse(req.body.from);
+    const toMs = Date.parse(req.body.to);
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) {
+      return reply.status(400).send({ error: "Invalid from/to date range" });
+    }
+
+    const candles: Candle[] = await ensureCandles(db, bybit, symbol, timeframe, fromMs, toMs);
+    if (candles.length === 0) {
+      return reply.status(400).send({ error: "No candle data available for this symbol/timeframe/range" });
+    }
+
+    const instrument = await bybit.getInstrumentInfo(symbol);
+    const defaults = Object.fromEntries(strategy.params.map((p) => [p.name, p.default]));
+    const baseParams = { ...defaults, ...req.body.baseParams };
+    const combos = generateParamCombinations(baseParams, req.body.sweep);
+
+    const engineConfig = {
+      initialCapital: req.body.initialCapital ?? 10_000,
+      maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
+      leverage: req.body.leverage ?? 5,
+      feeBps: req.body.feeBps ?? 5.5,
+      slippageBps: req.body.slippageBps ?? 2,
+      fillModel: req.body.fillModel ?? "signalClose",
+      lotSize: instrument.lotSize,
+      tickSize: instrument.tickSize,
+    } as const;
+    const minTrades = req.body.minTrades ?? 10;
+
+    let filteredOutCount = 0;
+    const evaluated: { params: Record<string, number>; stats: ReturnType<typeof runOneBacktest>["stats"] }[] = [];
+    for (const params of combos) {
+      const { stats } = runOneBacktest(strategy, candles, params, engineConfig);
+      if (stats.totalTrades < minTrades) {
+        filteredOutCount++;
+        continue;
+      }
+      evaluated.push({ params, stats });
+    }
+
+    evaluated.sort((a, b) => b.stats.totalPnlPct - a.stats.totalPnlPct);
+
+    return {
+      totalCombinations,
+      evaluatedCombinations: combos.length,
+      filteredOutCount,
+      results: evaluated.slice(0, MAX_OPTIMIZE_RESULTS),
     };
   });
 
