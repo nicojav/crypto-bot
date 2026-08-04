@@ -2,6 +2,7 @@ import { emaCross } from "./emaCross.js";
 import { emaCrossTpSl } from "./emaCrossTpSl.js";
 import { emaRsiPctTpSl } from "./emaRsiPctTpSl.js";
 import { customMaCross } from "./customMaCross.js";
+import { bbMeanReversion } from "./bbMeanReversion.js";
 import type { StrategyDefinition } from "./types.js";
 
 export type { StrategyDefinition, StrategyParamDef, SignalEvent, SignalAction } from "./types.js";
@@ -11,6 +12,7 @@ export const STRATEGY_REGISTRY: Record<string, StrategyDefinition> = {
   [emaCrossTpSl.id]: emaCrossTpSl,
   [emaRsiPctTpSl.id]: emaRsiPctTpSl,
   [customMaCross.id]: customMaCross,
+  [bbMeanReversion.id]: bbMeanReversion,
 };
 
 export function getStrategy(id: string): StrategyDefinition | undefined {

@@ -1,6 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { ema, sma, rma, rsi, atr, crossover, crossunder } from "./indicators.js";
+import { ema, sma, stddev, rma, rsi, atr, crossover, crossunder } from "./indicators.js";
 import type { Candle } from "./types.js";
+
+describe("stddev", () => {
+  it("computes the rolling population standard deviation", () => {
+    // Window [2,4,4,4,5,5,7,9] has population stddev = 2 (textbook example).
+    const values = [2, 4, 4, 4, 5, 5, 7, 9];
+    const out = stddev(values, 8);
+    expect(out[7]).toBeCloseTo(2, 10);
+  });
+
+  it("is null until the window is fully populated", () => {
+    const out = stddev([1, 2, 3], 5);
+    expect(out).toEqual([null, null, null]);
+  });
+
+  it("is 0 for a constant series", () => {
+    const out = stddev([5, 5, 5, 5], 3);
+    expect(out[2]).toBeCloseTo(0, 10);
+    expect(out[3]).toBeCloseTo(0, 10);
+  });
+});
 
 describe("sma", () => {
   it("is null until the window is fully populated, then is the rolling mean", () => {

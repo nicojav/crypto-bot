@@ -25,6 +25,33 @@ export function sma(values: readonly number[], length: number): (number | null)[
 }
 
 /**
+ * Rolling population standard deviation — matches Pine's ta.stdev default (biased=true,
+ * divides by `length` not `length-1`). Null until the window is fully populated.
+ */
+export function stddev(values: readonly number[], length: number): (number | null)[] {
+  if (length < 1) throw new Error(`stddev: length must be >= 1, got ${length}`);
+  const out = new Array<number | null>(values.length).fill(null);
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    sum += v;
+    sumSq += v * v;
+    if (i >= length) {
+      const old = values[i - length]!;
+      sum -= old;
+      sumSq -= old * old;
+    }
+    if (i >= length - 1) {
+      const mean = sum / length;
+      const variance = Math.max(0, sumSq / length - mean * mean); // guard tiny negative from fp rounding
+      out[i] = Math.sqrt(variance);
+    }
+  }
+  return out;
+}
+
+/**
  * Wilder's smoothing (RMA) — underlies Pine's ta.rsi and ta.atr.
  * SMA-seeded over the first `length` values; null until that seed is available.
  */
