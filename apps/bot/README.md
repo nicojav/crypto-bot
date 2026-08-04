@@ -41,12 +41,13 @@ graph TB
     DIAG["scripts/dumpClosedPnl.ts<br/>(read-only diagnostic)"] --> BYBIT_REST
     DIAG2["scripts/dumpReconciliationEvents.ts<br/>(read-only diagnostic)"] --> REVENT
 
-    BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
+    BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, POST optimize,<br/>GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
     CSTORE -->|"getKline (missing ranges only)"| BYBIT_MAINNET["Bybit REST API<br/>(mainnet, public — always real prices,<br/>independent of BYBIT_TESTNET)"]
     CSTORE -->|upsert/read| CANDLE[("Candle")]
-    BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets + composable customMaCross)"]
+    BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets, composable<br/>customMaCross, bbMeanReversion scalper)"]
     STRAT -->|toPine| PINEGEN["backtest/strategies/pineExport.ts"]
-    BTAPI -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick)"]
+    BTAPI -->|runOneBacktest, sweep combos| OPT["backtest/optimizer.ts<br/>(param-sweep + shared run helper)"]
+    OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick)"]
     ENGINE --> STATS["backtest/stats.ts"]
     DASH -->|REST| BTAPI
 ```
