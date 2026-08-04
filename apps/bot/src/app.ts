@@ -5,6 +5,7 @@ import type { BybitClient } from "./exchange/bybit.js";
 import type { SignalProcessor } from "./processor/signalProcessor.js";
 import { webhookPlugin } from "./routes/webhook.js";
 import { apiPlugin } from "./routes/api.js";
+import { backtestPlugin } from "./backtest/backtestRoutes.js";
 import { env } from "./env.js";
 
 export function buildApp(
@@ -47,6 +48,7 @@ export function buildApp(
   app.get("/health", async () => ({ status: "ok" }));
   app.register(webhookPlugin, { db });
   app.register(apiPlugin, { db, bybit });
+  app.register(backtestPlugin, { db, bybit });
 
   return app;
 }

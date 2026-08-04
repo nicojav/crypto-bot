@@ -12,14 +12,22 @@ vi.mock("../env.js", () => ({
 const mockGetExecutionList = vi.fn();
 const mockGetClosedPnL = vi.fn();
 const mockGetActiveOrders = vi.fn();
+// Two distinct getKline mocks so tests can assert getKline() is issued against the
+// mainnet market-data client (testnet: false, no keys), never the account/testnet client.
+const mockGetKlineAccount = vi.fn();
+const mockGetKlineMarketData = vi.fn();
 
 vi.mock("bybit-api", () => ({
-  RestClientV5: vi.fn(() => ({
-    getExecutionList: mockGetExecutionList,
-    getClosedPnL: mockGetClosedPnL,
-    getActiveOrders: mockGetActiveOrders,
-    getServerTime: vi.fn().mockResolvedValue({ retCode: 0, result: { timeNano: String(Date.now() * 1_000_000) } }),
-  })),
+  RestClientV5: vi.fn((opts?: { testnet?: boolean }) => {
+    const isMarketDataClient = opts?.testnet === false;
+    return {
+      getExecutionList: mockGetExecutionList,
+      getClosedPnL: mockGetClosedPnL,
+      getActiveOrders: mockGetActiveOrders,
+      getServerTime: vi.fn().mockResolvedValue({ retCode: 0, result: { timeNano: String(Date.now() * 1_000_000) } }),
+      getKline: isMarketDataClient ? mockGetKlineMarketData : mockGetKlineAccount,
+    };
+  }),
   WebsocketClient: vi.fn(() => ({
     on: vi.fn(),
     subscribeV5: vi.fn(),
@@ -322,4 +330,44 @@ describe("getOrderFill", () => {
 
     await expect(client.getOrderFill("SOLUSDT", "ord-1")).rejects.toThrow(/Order not found after 6 attempts/);
   }, 10_000);
+});
+
+describe("getKline", () => {
+  let client: InstanceType<typeof BybitClient>;
+
+  beforeEach(() => {
+    client = new BybitClient();
+    vi.clearAllMocks();
+  });
+
+  it("issues the request against the mainnet market-data client, never the account/testnet client", async () => {
+    mockGetKlineMarketData.mockResolvedValueOnce(
+      okPage([["1700000000000", "100", "101", "99", "100.5", "10", "1000"]])
+    );
+
+    const klines = await client.getKline("BTCUSDT", "1d", 1_700_000_000_000, 1_700_000_000_000);
+
+    expect(mockGetKlineMarketData).toHaveBeenCalledTimes(1);
+    expect(mockGetKlineMarketData).toHaveBeenCalledWith({
+      category: "linear", symbol: "BTCUSDT", interval: "D", start: 1_700_000_000_000, end: 1_700_000_000_000, limit: 1000,
+    });
+    expect(mockGetKlineAccount).not.toHaveBeenCalled();
+    expect(klines).toEqual([{ openTime: 1_700_000_000_000, open: 100, high: 101, low: 99, close: 100.5, volume: 10 }]);
+  });
+
+  it("paginates forward across multiple 1000-row pages", async () => {
+    const intervalMs = 24 * 60 * 60 * 1000;
+    const fullPage = Array.from({ length: 1000 }, (_, i) => [
+      String(1_700_000_000_000 + i * intervalMs), "100", "101", "99", "100.5", "10", "1000",
+    ]);
+    const lastPage = [["1700086400000", "100", "101", "99", "100.5", "10", "1000"]];
+    mockGetKlineMarketData
+      .mockResolvedValueOnce(okPage(fullPage))
+      .mockResolvedValueOnce(okPage(lastPage));
+
+    const klines = await client.getKline("BTCUSDT", "1d", 1_700_000_000_000, 1_700_000_000_000 + 1001 * intervalMs);
+
+    expect(mockGetKlineMarketData).toHaveBeenCalledTimes(2);
+    expect(klines.length).toBeGreaterThan(1000);
+  });
 });

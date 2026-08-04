@@ -92,6 +92,23 @@ model FundingEvent {
   @@index([symbol, execTime])
 }
 
+// Cached OHLCV candles for the backtesting tool — downloaded once per symbol+timeframe
+// from Bybit and reused across backtest runs (see apps/bot/src/backtest/candleStore.ts).
+model Candle {
+  id        Int    @id @default(autoincrement())
+  symbol    String
+  timeframe String   // 5m | 15m | 4h | 1d | 1w
+  openTime  Int      // bar open time, ms epoch
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float
+
+  @@unique([symbol, timeframe, openTime])
+  @@index([symbol, timeframe, openTime])
+}
+
 // Persistent audit trail for reconciliation anomalies (dropped fills, qty drift, phantom
 // promotions, unmatched closedPnl lookups). Console logs are ephemeral — Railway's log
 // retention doesn't reach back far enough to forensically investigate an issue reported

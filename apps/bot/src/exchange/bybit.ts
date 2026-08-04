@@ -1,5 +1,24 @@
-import { RestClientV5 } from "bybit-api";
+import { RestClientV5, type KlineIntervalV3 } from "bybit-api";
 import { env } from "../env.js";
+
+// Timeframes supported by the backtesting tool, mapped to Bybit's kline interval codes.
+export type TimeframeId = "5m" | "15m" | "4h" | "1d" | "1w";
+
+const BYBIT_INTERVAL: Record<TimeframeId, KlineIntervalV3> = {
+  "5m": "5",
+  "15m": "15",
+  "4h": "240",
+  "1d": "D",
+  "1w": "W",
+};
+
+export const TIMEFRAME_MS: Record<TimeframeId, number> = {
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+  "1w": 7 * 24 * 60 * 60_000,
+};
 
 export interface Balance {
   equity: number;
@@ -34,6 +53,15 @@ export interface ExecutionFill {
   execFee: number;
   execTime: number;
   closedSize: number;
+}
+
+export interface Kline {
+  openTime: number; // ms epoch
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
 }
 
 export interface ClosedPnLEntry {
@@ -94,6 +122,12 @@ function bybitError(err: unknown): never {
 
 export class BybitClient {
   private client: RestClientV5;
+  // Historical klines must reflect real prices regardless of which environment the account
+  // trades in — Bybit's testnet market data is synthetic and not representative (observed
+  // >100% average daily moves). getKline() is the only method that uses this client; every
+  // other (account-scoped) method stays on `client` above. No API keys needed — the v5
+  // market-data kline endpoint is public/unauthenticated.
+  private marketDataClient: RestClientV5;
 
   constructor() {
     this.client = new RestClientV5({
@@ -101,6 +135,7 @@ export class BybitClient {
       secret: env.BYBIT_API_SECRET,
       testnet: env.BYBIT_TESTNET,
     });
+    this.marketDataClient = new RestClientV5({ testnet: false });
   }
 
   async checkClockDrift(): Promise<void> {
@@ -378,6 +413,46 @@ export class BybitClient {
       cursor = res.result.nextPageCursor ?? undefined;
       if (params.limit) break;
     } while (cursor);
+    return results;
+  }
+
+  /**
+   * Fetch OHLCV klines for [startMs, endMs], paginating forward 1000 bars/call
+   * (Bybit's per-request max). Used by the backtest candle cache — never called
+   * on the live trading path. Always reads from mainnet (see `marketDataClient`
+   * above) — real historical prices don't depend on which environment trades.
+   */
+  async getKline(symbol: string, timeframe: TimeframeId, startMs: number, endMs: number): Promise<Kline[]> {
+    const interval = BYBIT_INTERVAL[timeframe];
+    const intervalMs = TIMEFRAME_MS[timeframe];
+    const results: Kline[] = [];
+    let cursorStart = startMs;
+
+    while (cursorStart <= endMs) {
+      const res = await withRetry(() =>
+        this.marketDataClient.getKline({ category: "linear", symbol, interval, start: cursorStart, end: endMs, limit: 1000 })
+      );
+      if (res.retCode !== 0) bybitError(res);
+
+      // Bybit returns newest-first; normalise to ascending order.
+      const batch = res.result.list
+        .map((k) => ({
+          openTime: Number(k[0]),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        }))
+        .sort((a, b) => a.openTime - b.openTime);
+
+      if (batch.length === 0) break;
+      results.push(...batch);
+
+      if (batch.length < 1000) break; // exhausted available data in range
+      cursorStart = batch[batch.length - 1]!.openTime + intervalMs;
+    }
+
     return results;
   }
 }
