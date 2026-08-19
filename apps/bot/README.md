@@ -46,18 +46,34 @@ graph TB
     CSTORE -->|upsert/read| CANDLE[("Candle")]
     BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets, composable<br/>customMaCross, bbMeanReversion scalper)"]
     STRAT -->|toPine| PINEGEN["backtest/strategies/pineExport.ts"]
-    BTAPI -->|runOneBacktest, sweep combos| OPT["backtest/optimizer.ts<br/>(param-sweep + shared run helper)"]
+
+    BTAPI -->|"runFull / runStats<br/>(per-request pool)"| POOL["backtest/workerPool.ts<br/>(fixed worker_thread pool —<br/>keeps every backtest off this<br/>process's event loop)"]
+    POOL -->|"pack once per candle array,<br/>share by reference"| CBUF["backtest/candleBuffer.ts<br/>(columnar SharedArrayBuffer)"]
+    POOL -->|postMessage task| WORKER["backtest/backtestWorker.ts<br/>(worker_thread — unpacks candles,<br/>runs strategy.run + engine + stats,<br/>optionally scoreResult)"]
+    WORKER -->|runOneBacktest| OPT["backtest/optimizer.ts<br/>(param-sweep + shared run helper)"]
     OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick)"]
     ENGINE --> STATS["backtest/stats.ts"]
+    WORKER -.->|"scoreResult (score-kind tasks)"| SCORING["backtest/scoring.ts<br/>(Sharpe/Calmar + risk-adjusted<br/>composite score, not raw PnL)"]
 
-    BTAPI -->|"detached, single-job lock"| RUNNER["backtest/optimizationRunner.ts<br/>(Strategy Finder background job:<br/>iterates strategy x symbol x timeframe,<br/>yields to the event loop between backtests)"]
+    BTAPI -->|"detached, single-job lock"| RUNNER["backtest/optimizationRunner.ts<br/>(Strategy Finder background job:<br/>iterates strategy x symbol x timeframe,<br/>one pool for the whole run)"]
     RUNNER -->|ensureCandles| CSTORE
-    RUNNER -->|searchCell| SEARCH["backtest/search.ts<br/>(coarse grid → refine,<br/>in-sample/out-of-sample split + overfit flag)"]
-    SEARCH -->|runOneBacktest| OPT
-    SEARCH -->|scoreResult| SCORING["backtest/scoring.ts<br/>(Sharpe/Calmar + risk-adjusted<br/>composite score, not raw PnL)"]
+    RUNNER -->|"searchCell (pool in opts)"| SEARCH["backtest/search.ts<br/>(coarse grid → refine,<br/>in-sample/out-of-sample split + overfit flag)"]
+    SEARCH -->|runScored, dispatched concurrently| POOL
     RUNNER -->|"progress + bounded top-N results"| OPTRUN[("OptimizationRun")]
     DASH -->|REST| BTAPI
 ```
+
+`backtest/workerPool.ts` replaced running backtests synchronously inline in `backtestRoutes.ts` and
+`optimizationRunner.ts` — this process also runs live trading (`SignalProcessor` polling every
+500ms, `Reconciler` ticking every 500ms-60s), so a large `/run` or `/optimize` sweep used to be
+able to stall webhook ingestion and reconciliation for as long as it took, and risk a Railway
+healthcheck restart mid-position. A pool is created per operation (one `/run` request, one
+`/optimize` sweep, one Strategy Finder run) and destroyed when it completes. Candle data reaches
+worker threads via a columnar `SharedArrayBuffer` (`candleBuffer.ts`) rather than being
+structurally cloned per task — packed once per distinct candle array, then reused (each worker
+unpacks and caches its own `Candle[]` view the first time it sees a given array). `search.ts`
+falls back to its original in-process sequential path when no pool is supplied (e.g. in tests
+using ad-hoc `StrategyDefinition` objects a worker thread couldn't resolve by id).
 
 ## Signal → Trade lifecycle
 
@@ -94,8 +110,9 @@ instead of running inline in the request:
 4. Progress and a bounded top-N ranked result set are persisted to `OptimizationRun` as the
    run progresses, so `GET /api/backtest/optimize/auto/:runId` can be polled mid-run. A
    module-level single-job lock (this process also runs live trading) rejects a second run
-   while one is active; `searchCell` yields to the event loop every few backtests so
-   `SignalProcessor`/`Reconciler` keep ticking.
+   while one is active; every backtest in the run dispatches to `backtest/workerPool.ts`
+   (one pool for the whole run), so the actual simulation work never touches this process's
+   event loop and `SignalProcessor`/`Reconciler` keep ticking regardless of run size.
 5. If the process dies mid-run (crash, deploy, a dev-mode file-watcher restart), the row is
    orphaned at `status: "running"` forever — no live process's in-memory lock ever points at
    it again, so nothing marks it done. `healOrphanedRuns` sweeps every stuck `"running"` row

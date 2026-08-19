@@ -1,13 +1,15 @@
 import type { FastifyPluginAsync } from "fastify";
+
 import type { PrismaClient } from "../generated/prisma/client.js";
 import type { BybitClient, TimeframeId } from "../exchange/bybit.js";
 import { env } from "../env.js";
 import { ensureCandles } from "./candleStore.js";
 import { listStrategies, getStrategy } from "./strategies/index.js";
 import type { EquityPoint } from "./engine.js";
-import { countCombinations, generateParamCombinations, runOneBacktest, type SweepParam } from "./optimizer.js";
+import { countCombinations, generateParamCombinations, type SweepParam } from "./optimizer.js";
 import { runAutoOptimization, isOptimizationRunning, cancelRun, getActiveRunId, type AutoOptimizeConfig } from "./optimizationRunner.js";
 import { DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from "./scoring.js";
+import { BacktestWorkerPool } from "./workerPool.js";
 import type { Candle } from "./types.js";
 
 const TIMEFRAMES = ["5m", "15m", "4h", "1d", "1w"] as const;
@@ -15,6 +17,32 @@ const MAX_CANDLES_PER_REQUEST = 5_000;
 const MAX_CURVE_POINTS = 1_500;
 const MAX_OPTIMIZE_COMBINATIONS = 500;
 const MAX_OPTIMIZE_RESULTS = 50;
+/** Bounds one /optimize sweep's total work (candles x combos) — worker threads keep this off
+ * the event loop, but an unbounded sweep can still monopolize the pool for an unreasonable time. */
+const MAX_OPTIMIZE_WORKLOAD = 100_000_000;
+/** Bounds one Strategy Finder run's cell count (strategies x symbols x timeframes) — nothing in
+ * the UI enforces this, and each cell is itself ~1,200 backtests. */
+const MAX_AUTO_OPTIMIZE_CELLS = 100;
+/** How many /run + /optimize requests may have their own worker pool active at once. Each pool
+ * uses up to os.availableParallelism()-1 threads, so unbounded concurrent requests would still
+ * let many browser tabs fight over the same physical cores (and, at the limit, starve the
+ * trading process of CPU) even though no single request can block the event loop anymore. */
+const MAX_CONCURRENT_ADHOC_POOLS = 2;
+let activeAdhocPools = 0;
+
+async function withPool<T>(fn: (pool: BacktestWorkerPool) => Promise<T>): Promise<T> {
+  if (activeAdhocPools >= MAX_CONCURRENT_ADHOC_POOLS) {
+    throw Object.assign(new Error("Too many concurrent backtests running — wait for one to finish and try again"), { statusCode: 429 });
+  }
+  activeAdhocPools++;
+  const pool = new BacktestWorkerPool();
+  try {
+    return await fn(pool);
+  } finally {
+    activeAdhocPools--;
+    await pool.destroy();
+  }
+}
 
 // ── Shared schemas ────────────────────────────────────────────────────────────
 
@@ -399,8 +427,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
 
     const instrument = await bybit.getInstrumentInfo(symbol);
     const params = { ...Object.fromEntries(strategy.params.map((p) => [p.name, p.default])), ...req.body.params };
-
-    const { trades, equityCurve, buyHoldCurve, stats } = runOneBacktest(strategy, candles, params, {
+    const engineConfig = {
       initialCapital: req.body.initialCapital ?? 10_000,
       maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
       leverage: req.body.leverage ?? 5,
@@ -409,7 +436,12 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       fillModel: req.body.fillModel ?? "signalClose",
       lotSize: instrument.lotSize,
       tickSize: instrument.tickSize,
-    });
+    } as const;
+
+    // Off the main thread — this request used to run the full simulation synchronously inline,
+    // which could stall webhook ingestion/reconciliation in this same process for as long as a
+    // large candle window took to simulate. See workerPool.ts.
+    const { trades, equityCurve, buyHoldCurve, stats } = await withPool((pool) => pool.runFull(candles, strategy.id, params, engineConfig));
 
     const markers = trades.flatMap((t) => [
       { time: t.entryTime, price: t.entryPrice, kind: t.side === "BUY" ? "long" : "short" },
@@ -504,6 +536,13 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     const baseParams = { ...defaults, ...req.body.baseParams };
     const combos = generateParamCombinations(baseParams, req.body.sweep);
 
+    const workload = candles.length * combos.length;
+    if (workload > MAX_OPTIMIZE_WORKLOAD) {
+      return reply.status(400).send({
+        error: `Sweep would evaluate ${combos.length} combinations over ${candles.length} candles (${workload.toLocaleString()} candle-evaluations) — narrow the date range, timeframe, or sweep.`,
+      });
+    }
+
     const engineConfig = {
       initialCapital: req.body.initialCapital ?? 10_000,
       maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
@@ -516,10 +555,14 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     } as const;
     const minTrades = req.body.minTrades ?? 10;
 
+    // Off the main thread and dispatched concurrently — this loop used to run every combo
+    // synchronously inline with no yielding, up to MAX_OPTIMIZE_COMBINATIONS in one request.
     let filteredOutCount = 0;
-    const evaluated: { params: Record<string, number>; stats: ReturnType<typeof runOneBacktest>["stats"] }[] = [];
-    for (const params of combos) {
-      const { stats } = runOneBacktest(strategy, candles, params, engineConfig);
+    const allResults = await withPool((pool) =>
+      Promise.all(combos.map((params) => pool.runStats(candles, strategy.id, params, engineConfig).then((r) => ({ params, stats: r.stats })))),
+    );
+    const evaluated: { params: Record<string, number>; stats: (typeof allResults)[number]["stats"] }[] = [];
+    for (const { params, stats } of allResults) {
       if (stats.totalTrades < minTrades) {
         filteredOutCount++;
         continue;
@@ -585,6 +628,13 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     const strategyIds = req.body.strategyIds && req.body.strategyIds.length > 0 ? req.body.strategyIds : listStrategies().map((s) => s.id);
     for (const id of strategyIds) {
       if (!getStrategy(id)) return reply.status(400).send({ error: `Unknown strategy: ${id}` });
+    }
+
+    const cellCount = strategyIds.length * req.body.symbols.length * req.body.timeframes.length;
+    if (cellCount > MAX_AUTO_OPTIMIZE_CELLS) {
+      return reply.status(400).send({
+        error: `${cellCount} cells (strategies x symbols x timeframes) requested — narrow the selection to ${MAX_AUTO_OPTIMIZE_CELLS} or fewer. Each cell is its own coarse-to-fine search.`,
+      });
     }
 
     const fromMs = Date.parse(req.body.from);

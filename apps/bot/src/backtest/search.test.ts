@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { buildCoarseGrid, searchCell, CancelledError, DEFAULT_SEARCH_OPTIONS, type SearchOptions } from "./search.js";
+import { BacktestWorkerPool } from "./workerPool.js";
+import { getStrategy } from "./strategies/index.js";
 import type { EngineConfig } from "./engine.js";
 import type { StrategyDefinition } from "./strategies/types.js";
 import type { Candle } from "./types.js";
@@ -207,4 +209,59 @@ describe("searchCell overfit detection", () => {
     const cancelledOpts: SearchOptions = { ...countingOpts, isCancelled: () => true, onBacktest: undefined };
     await expect(searchCell(makeSideStrategy(), candles, "1d", ENGINE, cancelledOpts)).rejects.toThrow(CancelledError);
   });
+});
+
+// oscillating uptrend, not a straight line — a monotonic ramp never produces an EMA crossover.
+function oscillatingCandles(n: number): Candle[] {
+  const candles: Candle[] = [];
+  for (let i = 0; i < n; i++) {
+    const close = 100 + i * 0.2 + 8 * Math.sin(i / 6);
+    candles.push({ openTime: i * 60_000, open: close, high: close + 1, low: close - 1, close, volume: 1 });
+  }
+  return candles;
+}
+
+describe("searchCell with a worker pool", () => {
+  let pool: BacktestWorkerPool | undefined;
+  afterEach(async () => {
+    await pool?.destroy();
+    pool = undefined;
+  });
+
+  it(
+    "produces the same finalists (by outcome) whether run in-process or dispatched to the worker pool",
+    async () => {
+      const strategy = getStrategy("emaCross")!;
+      const candles = oscillatingCandles(200);
+      const baseOpts: SearchOptions = {
+        ...DEFAULT_SEARCH_OPTIONS,
+        oosFraction: 0.3,
+        minTrades: 1,
+        scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
+      };
+
+      const inProcess = await searchCell(strategy, candles, "1d", ENGINE, baseOpts);
+
+      pool = new BacktestWorkerPool(2);
+      const viaPool = await searchCell(strategy, candles, "1d", ENGINE, { ...baseOpts, pool });
+
+      expect(viaPool.length).toBe(inProcess.length);
+      expect(viaPool.map((r) => r.params)).toEqual(inProcess.map((r) => r.params));
+      expect(viaPool.map((r) => r.isStats.totalPnlPct)).toEqual(inProcess.map((r) => r.isStats.totalPnlPct));
+      expect(viaPool.map((r) => r.overfitFlag)).toEqual(inProcess.map((r) => r.overfitFlag));
+    },
+    30_000,
+  );
+
+  it(
+    "surfaces a worker-side error (e.g. an unregistered strategy id) as a rejection",
+    async () => {
+      pool = new BacktestWorkerPool(1);
+      const unregistered: StrategyDefinition = { ...makeSideStrategy(), id: "not-in-the-registry" };
+      const opts: SearchOptions = { ...DEFAULT_SEARCH_OPTIONS, oosFraction: 0.3, minTrades: 1, pool };
+
+      await expect(searchCell(unregistered, trendCandles(20, 100, 110), "1d", ENGINE, opts)).rejects.toThrow();
+    },
+    30_000,
+  );
 });

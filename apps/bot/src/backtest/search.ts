@@ -5,6 +5,7 @@ import type { StrategyDefinition, StrategyParamDef } from "./strategies/types.js
 import type { Candle } from "./types.js";
 import type { BacktestStats } from "./stats.js";
 import type { TimeframeId } from "../exchange/bybit.js";
+import type { BacktestWorkerPool } from "./workerPool.js";
 
 function roundTo(value: number, precision = 8): number {
   const factor = 10 ** precision;
@@ -145,6 +146,16 @@ export interface SearchOptions {
   onBacktest?: () => void;
   /** Checked between backtests; returning true aborts the cell via CancelledError. */
   isCancelled?: () => boolean;
+  /**
+   * When supplied, every backtest in this cell runs on the worker-thread pool instead of
+   * in-process — the pool is what actually keeps the live trading loop (SignalProcessor,
+   * Reconciler) responsive during a search. Requires `strategy` to be resolvable by
+   * `getStrategy(strategy.id)` in strategies/index.ts, since a worker thread can only look
+   * strategies up by id, not receive an arbitrary closure — so leave this unset for ad-hoc
+   * StrategyDefinition objects (e.g. in tests), which fall back to the in-process sequential
+   * path below.
+   */
+  pool?: BacktestWorkerPool;
 }
 
 export const DEFAULT_SEARCH_OPTIONS: SearchOptions = {
@@ -189,6 +200,45 @@ async function evaluate(
 }
 
 /**
+ * Evaluates a batch of param combos against one candle set. Routes through `opts.pool` when
+ * present (dispatched concurrently across the worker pool — see SearchOptions.pool), otherwise
+ * falls back to the original in-process sequential loop with cooperative `setImmediate`
+ * yielding. Both paths call `onBacktest` once per completed backtest and honor `isCancelled`
+ * by throwing CancelledError, matching `evaluate`'s existing per-item contract.
+ */
+async function evaluateBatch(
+  strategy: StrategyDefinition,
+  candles: readonly Candle[],
+  paramsList: Record<string, number>[],
+  engineConfig: EngineConfig,
+  timeframe: TimeframeId,
+  weights: ScoreWeights,
+  opts: SearchOptions,
+  maybeYield: () => Promise<void>,
+): Promise<{ params: Record<string, number>; score: number; stats: BacktestStats }[]> {
+  if (opts.pool) {
+    const pool = opts.pool;
+    const scored = await Promise.all(
+      paramsList.map(async (params) => {
+        const { score, stats } = await pool.runScored(candles, strategy.id, params, engineConfig, timeframe, weights);
+        opts.onBacktest?.();
+        return { params, score, stats };
+      }),
+    );
+    if (opts.isCancelled?.()) throw new CancelledError("Search cancelled");
+    return scored;
+  }
+
+  const scored: { params: Record<string, number>; score: number; stats: BacktestStats }[] = [];
+  for (const params of paramsList) {
+    const { score, result } = await evaluate(strategy, candles, params, engineConfig, timeframe, weights, opts);
+    scored.push({ params, score, stats: result.stats });
+    await maybeYield();
+  }
+  return scored;
+}
+
+/**
  * Fingerprint of a backtest's actual outcome (not its params) — a strategy's signals only
  * change at the candle where an indicator threshold is actually crossed, so on a finite
  * candle set, many nearby param values (especially within one refine neighborhood) produce
@@ -230,12 +280,7 @@ export async function searchCell(
 
   // ── Coarse pass over in-sample data ────────────────────────────────────────
   const coarseCombos = buildCoarseGrid(strategy, opts.coarseBudget);
-  const coarseScored: { params: Record<string, number>; score: number; stats: BacktestStats }[] = [];
-  for (const params of coarseCombos) {
-    const { score, result } = await evaluate(strategy, isCandles, params, engineConfig, timeframe, opts.scoreWeights, opts);
-    coarseScored.push({ params, score, stats: result.stats });
-    await maybeYield();
-  }
+  const coarseScored = await evaluateBatch(strategy, isCandles, coarseCombos, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
   coarseScored.sort((a, b) => b.score - a.score);
 
   // ── Refine pass: zoom in around the best coarse regions ────────────────────
@@ -251,12 +296,7 @@ export async function searchCell(
     }
   }
 
-  const refinedScored: { params: Record<string, number>; score: number; stats: BacktestStats }[] = [];
-  for (const params of refineCombos) {
-    const { score, result } = await evaluate(strategy, isCandles, params, engineConfig, timeframe, opts.scoreWeights, opts);
-    refinedScored.push({ params, score, stats: result.stats });
-    await maybeYield();
-  }
+  const refinedScored = await evaluateBatch(strategy, isCandles, refineCombos, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
 
   // ── Pick finalists (coarse + refined, best score per distinct outcome) ─────
   // Deduping by outcome rather than by literal param equality is what actually stops
@@ -271,22 +311,25 @@ export async function searchCell(
   const finalists = [...bestByOutcome.values()].sort((a, b) => b.score - a.score).slice(0, opts.keepTop);
 
   // ── Validate finalists on out-of-sample data ────────────────────────────────
-  const results: SearchResult[] = [];
-  for (const f of finalists) {
-    const is = await evaluate(strategy, isCandles, f.params, engineConfig, timeframe, opts.scoreWeights, opts);
-    const oos = await evaluate(strategy, oosCandles, f.params, engineConfig, timeframe, opts.scoreWeights, opts);
-    await maybeYield();
+  const finalistParams = finalists.map((f) => f.params);
+  const [isResults, oosResults] = await Promise.all([
+    evaluateBatch(strategy, isCandles, finalistParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield),
+    evaluateBatch(strategy, oosCandles, finalistParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield),
+  ]);
 
+  const results: SearchResult[] = finalists.map((f, i) => {
+    const is = isResults[i]!;
+    const oos = oosResults[i]!;
     const overfitFlag = is.score > 0 && (oos.score <= 0 || oos.score < is.score * 0.3);
-    results.push({
+    return {
       params: f.params,
-      isStats: is.result.stats,
-      oosStats: oos.result.stats,
+      isStats: is.stats,
+      oosStats: oos.stats,
       isScore: is.score,
       oosScore: oos.score,
       overfitFlag,
-    });
-  }
+    };
+  });
 
   results.sort((a, b) => b.oosScore - a.oosScore);
   return results;

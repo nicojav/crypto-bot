@@ -5,6 +5,7 @@ import type { CandleSource } from "./candleStore.js";
 import { ensureCandles } from "./candleStore.js";
 import { getStrategy, listStrategies } from "./strategies/index.js";
 import { searchCell, CancelledError, DEFAULT_COARSE_BUDGET, DEFAULT_REFINE_OPTIONS, type SearchResult, type SearchOptions } from "./search.js";
+import { BacktestWorkerPool } from "./workerPool.js";
 import type { ScoreWeights } from "./scoring.js";
 
 // Minimal interface — BybitClient satisfies this structurally (mirrors CandleSource in candleStore.ts).
@@ -96,6 +97,12 @@ export async function runAutoOptimization(
 
   const isCancelled = () => cancelledRunIds.has(runId);
 
+  // One pool for the whole run (all cells) — spawning worker threads per cell would repay their
+  // startup cost dozens of times over on a multi-cell matrix for no benefit. This is what keeps
+  // the live trading loop (SignalProcessor/Reconciler, ticking every 500ms-60s in this same
+  // process) responsive during a run: every backtest actually executes off this event loop.
+  const pool = new BacktestWorkerPool();
+
   try {
     const strategyIds = config.strategyIds.length > 0 ? config.strategyIds : listStrategies().map((s) => s.id);
     const fromMs = Date.parse(config.from);
@@ -136,6 +143,7 @@ export async function runAutoOptimization(
         yieldEvery: 25,
         onBacktest: () => { backtestsRun++; },
         isCancelled,
+        pool,
       };
 
       const cellResults = await searchCell(strategy, candles, cell.timeframe, engineConfig, searchOpts);
@@ -164,5 +172,6 @@ export async function runAutoOptimization(
   } finally {
     activeRunId = null;
     cancelledRunIds.delete(runId);
+    await pool.destroy();
   }
 }
