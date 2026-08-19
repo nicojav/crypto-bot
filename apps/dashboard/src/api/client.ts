@@ -1,4 +1,9 @@
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
+// Production default is same-origin ("") — the dashboard's own server (server/createServer.js)
+// proxies /api/* to the bot, injecting the real API_TOKEN server-side, so the browser never
+// needs to see it. VITE_API_URL/VITE_API_TOKEN stay supported for local dev only (talking
+// directly to a bot running on a different port with no proxy in front of it) — set them in
+// apps/dashboard/.env, which is never used for a production build.
+const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 const TOKEN = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? "";
 
 export type Bot = {
@@ -104,9 +109,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   // which broke every bodyless POST (e.g. the optimize/auto cancel and kill-switch routes).
   const res = await fetch(`${BASE}${path}`, {
     ...init,
+    credentials: "same-origin", // send the dashboard's own session cookie (see server/createServer.js)
     headers: {
       ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
-      Authorization: `Bearer ${TOKEN}`,
+      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}), // dev-only direct-to-bot path
       ...(init?.headers ?? {}),
     },
   });

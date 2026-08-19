@@ -3,7 +3,10 @@ import { useNavigate } from "react-router-dom";
 import type { Bot } from "../api/client";
 import { Switch } from "./ui/Switch";
 
-const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
+// The bot's own public URL, for the webhook TradingView alerts POST to — always the real bot
+// address, unlike api/client.ts's BASE (which is same-origin in production, since requests
+// there go through the dashboard's own proxy, not directly to the bot).
+const API_URL = (import.meta.env.VITE_WEBHOOK_BASE_URL as string | undefined) ?? "http://localhost:3000";
 
 interface BotCardProps {
   bot: Bot;
