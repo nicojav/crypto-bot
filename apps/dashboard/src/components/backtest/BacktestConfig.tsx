@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FC } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+
 import { fetchBacktestStrategies, fetchBacktestPine, fetchBots, type BacktestTimeframe, type BacktestStrategyParam, type Bot } from "../../api/client";
 import { Select } from "../ui/Select";
 import { Field } from "../ui/Field";
+import { Switch } from "../ui/Switch";
 import { BacktestOptimizePanel } from "./BacktestOptimizePanel";
 
 // One-click suggestions for the free-text symbol field — not a constraint, any symbol can be typed.
@@ -22,6 +24,9 @@ export interface BacktestRunConfig {
   feeBps: number;
   slippageBps: number;
   fillModel: "signalClose" | "nextOpen";
+  maintenanceMarginRate?: number;
+  compareFillModel?: boolean;
+  sensitivityCheck?: boolean;
 }
 
 const TIMEFRAMES: { value: BacktestTimeframe; label: string }[] = [
@@ -74,6 +79,9 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
   const [feeBps, setFeeBps] = useState("5.5");
   const [slippageBps, setSlippageBps] = useState("2");
   const [fillModel, setFillModel] = useState<"signalClose" | "nextOpen">("signalClose");
+  const [maintenanceMarginRate, setMaintenanceMarginRate] = useState(""); // blank = liquidation check off
+  const [compareFillModel, setCompareFillModel] = useState(false);
+  const [sensitivityCheck, setSensitivityCheck] = useState(false);
 
   // Select the first strategy/symbol once data loads, and reset params to that strategy's defaults.
   useEffect(() => {
@@ -151,6 +159,9 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
     feeBps: Number(feeBps) || 0,
     slippageBps: Number(slippageBps) || 0,
     fillModel,
+    ...(maintenanceMarginRate.trim() !== "" ? { maintenanceMarginRate: Number(maintenanceMarginRate) / 100 } : {}),
+    compareFillModel,
+    sensitivityCheck,
   };
 
   function handleRun() {
@@ -242,7 +253,27 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
               ]}
             />
           </div>
+          <Field
+            label="Maintenance margin"
+            type="number"
+            min="0"
+            step="0.1"
+            value={maintenanceMarginRate}
+            onChange={setMaintenanceMarginRate}
+            hint="% · blank = no liquidation check"
+          />
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <Switch checked={compareFillModel} onChange={setCompareFillModel} />
+          <span className="text-sm text-text-2">Compare fill models</span>
+        </label>
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <Switch checked={sensitivityCheck} onChange={setSensitivityCheck} />
+          <span className="text-sm text-text-2">2x cost sensitivity check</span>
+        </label>
       </div>
 
       <div className="flex justify-end items-center gap-3 pt-1">

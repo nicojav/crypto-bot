@@ -1,9 +1,11 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
+
 import { runBacktest, type BacktestRunResult } from "../api/client";
 import { BacktestConfig, type BacktestRunConfig, type BacktestConfigPrefill } from "../components/backtest/BacktestConfig";
 import { BacktestKeyStats } from "../components/backtest/BacktestKeyStats";
+import { BacktestComparisonNotes } from "../components/backtest/BacktestComparisonNotes";
 import { BacktestEquityChart } from "../components/backtest/BacktestEquityChart";
 import { BacktestTradesTable } from "../components/backtest/BacktestTradesTable";
 import { BacktestAnalysis } from "../components/backtest/BacktestAnalysis";
@@ -24,11 +26,30 @@ const MODES: { key: Mode; label: string }[] = [
   { key: "finder", label: "Strategy Finder" },
 ];
 
+// Survives an accidental refresh — this is a convenience for the current session, not a history
+// (Strategy Finder already has full server-side persistence for that use case via
+// OptimizationRun). localStorage rather than a backend table since there's nothing here worth
+// keeping past the browser being cleared.
+const STORAGE_KEY = "backtest:lastRun";
+
+function loadPersisted(): { config: BacktestRunConfig; result: BacktestRunResult } | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { config: BacktestRunConfig; result: BacktestRunResult };
+    if (!parsed.config || !parsed.result) return null;
+    return parsed;
+  } catch {
+    return null; // corrupt/foreign data in the slot — ignore rather than crash the page
+  }
+}
+
 export default function BacktestPage() {
   const [mode, setMode] = useState<Mode>("single");
   const [tab, setTab] = useState<Tab>("performance");
-  const [lastConfig, setLastConfig] = useState<BacktestRunConfig | null>(null);
-  const [result, setResult] = useState<BacktestRunResult | null>(null);
+  const persisted = useRef(loadPersisted()).current; // read once, before first paint — not a live subscription
+  const [lastConfig, setLastConfig] = useState<BacktestRunConfig | null>(persisted?.config ?? null);
+  const [result, setResult] = useState<BacktestRunResult | null>(persisted?.result ?? null);
   const [prefill, setPrefill] = useState<BacktestConfigPrefill | null>(null);
   // Monotonic id for "load these params into the form" requests — doesn't need to trigger
   // its own render, only `prefill` does, so a ref (not state) is the right tool here.
@@ -36,7 +57,14 @@ export default function BacktestPage() {
 
   const mutation = useMutation({
     mutationFn: runBacktest,
-    onSuccess: setResult,
+    onSuccess: (data, config) => {
+      setResult(data);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ config, result: data }));
+      } catch {
+        // storage full/unavailable (private browsing) — the run still succeeded, just won't survive a refresh
+      }
+    },
   });
 
   function handleRun(config: BacktestRunConfig) {
@@ -80,7 +108,7 @@ export default function BacktestPage() {
 
           {mutation.isError && (
             <div className="bg-red/10 border border-red/20 rounded-xl px-4 py-3 text-sm text-red">
-              {(mutation.error as Error).message}
+              {(mutation.error).message}
             </div>
           )}
 
@@ -88,6 +116,7 @@ export default function BacktestPage() {
             <div className="relative">
               <div className={`space-y-4 transition-opacity ${mutation.isPending ? "opacity-40 pointer-events-none" : ""}`}>
                 <BacktestKeyStats stats={result.stats} />
+                <BacktestComparisonNotes result={result} />
 
                 <div className="flex items-center gap-1 bg-surface rounded-lg p-1 w-fit">
                   {TABS.map(({ key, label }) => (

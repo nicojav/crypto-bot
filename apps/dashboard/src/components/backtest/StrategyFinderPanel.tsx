@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FC, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useMemo, useState, type FC } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+
 import {
   fetchBacktestStrategies,
   fetchBacktestPine,
@@ -19,6 +19,7 @@ import {
 } from "../../api/client";
 import { Select } from "../ui/Select";
 import { Field } from "../ui/Field";
+import { Tooltip } from "../ui/Tooltip";
 
 const TIMEFRAMES: { value: BacktestTimeframe; label: string }[] = [
   { value: "5m", label: "5m" },
@@ -350,56 +351,7 @@ const RunProgress: FC<{
   );
 };
 
-// Themed hover tooltip — a native `title` attribute can't be styled at all (plain OS
-// black-box popup, wrong font, hard corners), and the table's rounded card uses
-// `overflow-hidden` for its corners, which would clip a normally-positioned absolute
-// tooltip the moment it tried to escape the card. Rendered into a portal at `document.body`
-// with `position: fixed` coordinates from the trigger's own bounding rect, so it always
-// draws above everything regardless of any ancestor's overflow/z-index.
-const Tooltip: FC<{ text: string; children: ReactNode; triggerClassName?: string }> = ({
-  text,
-  children,
-  triggerClassName = "cursor-help border-b border-dotted border-text-3/60 pb-px",
-}) => {
-  const triggerRef = useRef<HTMLSpanElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-
-  function show() {
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (rect) setPos({ top: rect.top - 8, left: rect.left + rect.width / 2 });
-  }
-  function hide() {
-    setPos(null);
-  }
-
-  return (
-    <span
-      ref={triggerRef}
-      onMouseEnter={show}
-      onMouseLeave={hide}
-      onFocus={show}
-      onBlur={hide}
-      tabIndex={0}
-      className={triggerClassName}
-    >
-      {children}
-      {pos &&
-        createPortal(
-          <div
-            role="tooltip"
-            className="pointer-events-none fixed z-50 w-56 -translate-x-1/2 -translate-y-full rounded-lg border border-border bg-card px-3 py-2 text-xs font-normal normal-case leading-relaxed tracking-normal text-text-2 shadow-xl"
-            style={{ top: pos.top, left: pos.left }}
-          >
-            {text}
-            <span className="absolute left-1/2 top-full -mt-1 h-2 w-2 -translate-x-1/2 rotate-45 border-b border-r border-border bg-card" />
-          </div>,
-          document.body,
-        )}
-    </span>
-  );
-};
-
-// Header label with a hover explanation.
+// Header label with a hover explanation — see ui/Tooltip.tsx.
 const Th: FC<{ label: string; help?: string; align?: "left" | "right" | "center" }> = ({ label, help, align = "left" }) => (
   <th className={`data-label px-4 py-2.5 font-normal ${align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left"}`}>
     {help ? <Tooltip text={help}>{label}</Tooltip> : label}

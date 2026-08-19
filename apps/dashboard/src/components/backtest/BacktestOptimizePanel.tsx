@@ -1,6 +1,7 @@
 import { useState, type FC } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
+
 import {
   runBacktestOptimize,
   type BacktestStrategyParam,
@@ -175,7 +176,7 @@ export const BacktestOptimizePanel: FC<BacktestOptimizePanelProps> = ({ sweepabl
 
           {mutation.isError && (
             <div className="bg-red/10 border border-red/20 rounded-xl px-4 py-3 text-sm text-red">
-              {(mutation.error as Error).message}
+              {(mutation.error).message}
             </div>
           )}
 

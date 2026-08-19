@@ -208,6 +208,8 @@ export type BacktestStrategy = {
   supportsPine: boolean;
 };
 
+export type BacktestExitReason = "tp" | "sl" | "liquidation" | "reversal" | "windowEnd";
+
 export type BacktestTrade = {
   entryTime: number;
   exitTime: number;
@@ -219,13 +221,23 @@ export type BacktestTrade = {
   pnlUsd: number;
   pnlPct: number;
   feeUsd: number;
+  /** Funding paid (positive) or received (negative) over the trade's life — already netted into pnlUsd. */
+  fundingUsd: number;
   barsHeld: number;
-  exitReason: "tp" | "sl" | "reversal" | "windowEnd";
+  exitReason: BacktestExitReason;
+  /** Max adverse excursion while open, in % (negative or zero). */
+  maePct: number;
+  /** Max favorable excursion while open, in % (positive or zero). */
+  mfePct: number;
 };
 
 export type BacktestEquityPoint = { time: number; equity: number };
 
 export type BacktestHistogramBin = { rangeStart: number; rangeEnd: number; count: number };
+
+export type BacktestExitReasonBreakdown = { exitReason: BacktestExitReason; count: number; avgPnlUsd: number };
+
+export type BacktestMonthlyReturn = { month: string; returnPct: number };
 
 export type BacktestStats = {
   totalPnlUsd: number;
@@ -246,6 +258,16 @@ export type BacktestStats = {
   avgProfitPct: number;
   avgLossPct: number;
   returnsHistogram: BacktestHistogramBin[];
+  sharpeRatio: number;
+  sortinoRatio: number;
+  calmarRatio: number;
+  /** Average trade PnL in units of the average loss size. null when there are no losing trades. */
+  expectancy: number | null;
+  /** % of bars in the window spent holding a position. */
+  exposurePct: number;
+  maxConsecutiveLosses: number;
+  exitReasonBreakdown: BacktestExitReasonBreakdown[];
+  monthlyReturns: BacktestMonthlyReturn[];
 };
 
 export type BacktestMarker = { time: number; price: number; kind: "long" | "short" | "exit"; exitReason?: string };
@@ -256,6 +278,10 @@ export type BacktestRunResult = {
   equityCurve: BacktestEquityPoint[];
   buyHoldCurve: BacktestEquityPoint[];
   markers: BacktestMarker[];
+  /** Present when the request set compareFillModel — the opposite fill model's stats. */
+  fillModelComparison?: { fillModel: "signalClose" | "nextOpen"; stats: BacktestStats };
+  /** Present when the request set sensitivityCheck — stats at 2x slippage and 2x fees. */
+  sensitivityComparison?: { slippageBps: number; feeBps: number; stats: BacktestStats };
 };
 
 export type BacktestCandle = { openTime: number; open: number; high: number; low: number; close: number; volume: number };
@@ -278,6 +304,9 @@ export const runBacktest = (body: {
   feeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
+  maintenanceMarginRate?: number;
+  compareFillModel?: boolean;
+  sensitivityCheck?: boolean;
 }) => req<BacktestRunResult>("/api/backtest/run", { method: "POST", body: JSON.stringify(body) });
 
 export const fetchBacktestCandles = (params: { symbol: string; timeframe: BacktestTimeframe; from: string; to: string }) => {

@@ -10,6 +10,7 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
+
 import { fetchBacktestCandles, type BacktestMarker, type BacktestTimeframe } from "../../api/client";
 
 interface BacktestChartProps {

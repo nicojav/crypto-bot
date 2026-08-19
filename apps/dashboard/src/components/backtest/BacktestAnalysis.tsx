@@ -1,17 +1,26 @@
 import type { FC } from "react";
 import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, ReferenceLine } from "recharts";
+
 import type { BacktestStats } from "../../api/client";
+import { Tooltip as HelpTooltip } from "../ui/Tooltip";
 
 const fmtUsd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
 const fmtPct = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtRatio = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const signedUsd = (v: number) => `${v >= 0 ? "+" : ""}${fmtUsd.format(v)}`;
 const signedPct = (v: number) => `${v >= 0 ? "+" : ""}${fmtPct.format(v)}%`;
 const pnlColor = (v: number) => (v >= 0 ? "text-green" : "text-red");
 
-function Stat({ label, value, color = "text-text-1" }: { label: string; value: string; color?: string }) {
+function Stat({ label, help, value, color = "text-text-1" }: { label: string; help?: string; value: string; color?: string }) {
   return (
     <div>
-      <div className="data-label mb-1.5">{label}</div>
+      {help ? (
+        <HelpTooltip text={help} triggerClassName="data-label mb-1.5 inline-block cursor-help border-b border-dotted border-text-3/60">
+          {label}
+        </HelpTooltip>
+      ) : (
+        <div className="data-label mb-1.5">{label}</div>
+      )}
       <div className={`font-mono text-sm font-medium tabular-nums ${color}`}>{value}</div>
     </div>
   );
@@ -41,11 +50,25 @@ export const BacktestAnalysis: FC<{ stats: BacktestStats }> = ({ stats }) => {
     <div className="bg-card border border-border rounded-[14px] p-5">
       <h3 className="font-semibold text-sm text-text-1 mb-5">Trades analysis</h3>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
         <Stat label="Average PnL" value={`${signedUsd(stats.avgPnlUsd)} · ${signedPct(stats.avgPnlPct)}`} color={pnlColor(stats.avgPnlUsd)} />
         <Stat label="Avg bars in trade" value={stats.avgBarsHeld.toFixed(1)} />
         <Stat label="Largest profit" value={signedUsd(stats.largestProfitUsd)} color="text-green" />
         <Stat label="Largest loss" value={signedUsd(stats.largestLossUsd)} color="text-red" />
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+        <Stat
+          label="Expectancy"
+          help="Average trade PnL expressed in units of the average loss ('R'). +1R means the average trade made as much as a typical loser lost; +2R means twice that. Dash means there are no losing trades yet to measure against."
+          value={stats.expectancy === null ? "—" : `${stats.expectancy >= 0 ? "+" : ""}${fmtRatio.format(stats.expectancy)}R`}
+          color={stats.expectancy === null ? "text-text-1" : pnlColor(stats.expectancy)}
+        />
+        <Stat
+          label="Max consecutive losses"
+          help="The longest losing streak in the backtest, in a row. A rough gauge of the worst-case run you'd need the discipline (and account size) to sit through."
+          value={String(stats.maxConsecutiveLosses)}
+          color={stats.maxConsecutiveLosses >= 5 ? "text-red" : "text-text-1"}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-8">
@@ -124,6 +147,38 @@ export const BacktestAnalysis: FC<{ stats: BacktestStats }> = ({ stats }) => {
           </div>
         </div>
       </div>
+
+      {stats.exitReasonBreakdown.length > 0 && (
+        <div className="mt-6">
+          <div className="data-label mb-3">Exit reasons</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {stats.exitReasonBreakdown.map((r) => (
+              <div key={r.exitReason} className="bg-surface border border-border rounded-xl px-3.5 py-2.5">
+                <div className="text-xs text-text-3 capitalize">{r.exitReason}</div>
+                <div className="font-mono text-sm font-medium text-text-1 mt-0.5">{r.count} trade{r.count === 1 ? "" : "s"}</div>
+                <div className={`font-mono text-xs mt-0.5 ${pnlColor(r.avgPnlUsd)}`}>{signedUsd(r.avgPnlUsd)} avg</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {stats.monthlyReturns.length > 0 && (
+        <div className="mt-6">
+          <div className="data-label mb-3">Monthly returns</div>
+          <div className="flex flex-wrap gap-2">
+            {stats.monthlyReturns.map((m) => (
+              <div
+                key={m.month}
+                className={`rounded-lg px-3 py-2 border ${m.returnPct >= 0 ? "bg-green/10 border-green/20" : "bg-red/10 border-red/20"}`}
+              >
+                <div className="text-[10px] text-text-3 font-mono">{m.month}</div>
+                <div className={`font-mono text-xs font-medium mt-0.5 ${pnlColor(m.returnPct)}`}>{signedPct(m.returnPct)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

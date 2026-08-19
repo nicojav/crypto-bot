@@ -1,5 +1,6 @@
 import type { FC } from "react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+
 import type { BacktestEquityPoint } from "../../api/client";
 
 const fmtShort = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "2-digit" });

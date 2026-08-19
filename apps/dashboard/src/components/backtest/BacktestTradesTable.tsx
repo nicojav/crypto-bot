@@ -1,6 +1,8 @@
 import { useMemo, useState, type FC } from "react";
+
 import type { BacktestTrade } from "../../api/client";
 import { fmtTime, fmtUsd, fmtQty } from "../tradeBadges";
+import { Tooltip } from "../ui/Tooltip";
 
 type SortKey = "num" | "entryTime" | "entryPrice" | "qty" | "pnl";
 type SortDir = "asc" | "desc";
@@ -12,6 +14,7 @@ const pnlColor = (v: number) => (v >= 0 ? "text-green" : "text-red");
 const EXIT_REASON_LABEL: Record<string, string> = {
   tp: "Take profit",
   sl: "Stop loss",
+  liquidation: "Liquidation",
   reversal: "Reversal",
   windowEnd: "Window end",
 };
@@ -27,8 +30,11 @@ function exportCsv(trades: BacktestTrade[]) {
     ["qty", (t) => t.qty],
     ["sizeUsd", (t) => t.sizeUsd],
     ["feeUsd", (t) => t.feeUsd],
+    ["fundingUsd", (t) => t.fundingUsd],
     ["netPnlUsd", (t) => t.pnlUsd],
     ["returnPct", (t) => t.pnlPct],
+    ["maePct", (t) => t.maePct],
+    ["mfePct", (t) => t.mfePct],
     ["barsHeld", (t) => t.barsHeld],
     ["exitReason", (t) => t.exitReason],
   ];
@@ -100,6 +106,16 @@ export const BacktestTradesTable: FC<{ trades: BacktestTrade[] }> = ({ trades })
                 <th className="data-label px-4 py-3 text-right font-normal">Exit</th>
                 <SortTh label="Size" col="qty" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
                 <th className="data-label px-4 py-3 text-left font-normal">Reason</th>
+                <th className="data-label px-4 py-3 text-right font-normal">
+                  <Tooltip text="Funding paid or received while this trade was open. Perpetual futures settle this periodically against open positions, separately from trading fees.">
+                    Funding
+                  </Tooltip>
+                </th>
+                <th className="data-label px-4 py-3 text-right font-normal">
+                  <Tooltip text="Max adverse / favorable excursion — the worst and best the trade's price return got while it was open, as a %. Shows how much it moved against you (or in your favor) before the eventual exit.">
+                    MAE / MFE
+                  </Tooltip>
+                </th>
                 <SortTh label="Net PnL" col="pnl" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" className="pr-5" />
                 <th className="data-label px-4 py-3 text-right font-normal pr-5">Return</th>
               </tr>
@@ -117,6 +133,15 @@ export const BacktestTradesTable: FC<{ trades: BacktestTrade[] }> = ({ trades })
                   <td className="px-4 py-3 text-right font-mono text-xs text-text-2">{fmtUsd.format(t.exitPrice)}</td>
                   <td className="px-4 py-3 text-right font-mono text-xs text-text-3">{fmtQty.format(t.qty)}</td>
                   <td className="px-4 py-3 text-xs text-text-3">{EXIT_REASON_LABEL[t.exitReason] ?? t.exitReason}</td>
+                  <td className={`px-4 py-3 text-right font-mono text-xs tabular-nums ${t.fundingUsd === 0 ? "text-text-3" : pnlColor(-t.fundingUsd)}`}>
+                    {/* fundingUsd is positive when the trade PAID funding — flip the sign so, like every other column here, positive/green means good for the trader. */}
+                    {t.fundingUsd === 0 ? "—" : signedUsd(-t.fundingUsd)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono text-xs tabular-nums whitespace-nowrap">
+                    <span className="text-red">{t.maePct.toFixed(2)}%</span>
+                    <span className="text-text-3"> / </span>
+                    <span className="text-green">{t.mfePct.toFixed(2)}%</span>
+                  </td>
                   <td className="pr-5 py-3 text-right">
                     <span className={`font-mono text-sm font-medium tabular-nums ${pnlColor(t.pnlUsd)}`}>{signedUsd(t.pnlUsd)}</span>
                   </td>
