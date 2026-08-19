@@ -16,6 +16,9 @@ const mockGetActiveOrders = vi.fn();
 // mainnet market-data client (testnet: false, no keys), never the account/testnet client.
 const mockGetKlineAccount = vi.fn();
 const mockGetKlineMarketData = vi.fn();
+// Same split for getFundingRateHistory.
+const mockGetFundingRateHistoryAccount = vi.fn();
+const mockGetFundingRateHistoryMarketData = vi.fn();
 
 vi.mock("bybit-api", () => ({
   RestClientV5: vi.fn((opts?: { testnet?: boolean }) => {
@@ -26,6 +29,7 @@ vi.mock("bybit-api", () => ({
       getActiveOrders: mockGetActiveOrders,
       getServerTime: vi.fn().mockResolvedValue({ retCode: 0, result: { timeNano: String(Date.now() * 1_000_000) } }),
       getKline: isMarketDataClient ? mockGetKlineMarketData : mockGetKlineAccount,
+      getFundingRateHistory: isMarketDataClient ? mockGetFundingRateHistoryMarketData : mockGetFundingRateHistoryAccount,
     };
   }),
   WebsocketClient: vi.fn(() => ({
@@ -369,5 +373,52 @@ describe("getKline", () => {
 
     expect(mockGetKlineMarketData).toHaveBeenCalledTimes(2);
     expect(klines.length).toBeGreaterThan(1000);
+  });
+});
+
+describe("getFundingHistory", () => {
+  let client: InstanceType<typeof BybitClient>;
+
+  beforeEach(() => {
+    client = new BybitClient();
+    vi.clearAllMocks();
+  });
+
+  it("issues the request against the mainnet market-data client, never the account/testnet client", async () => {
+    mockGetFundingRateHistoryMarketData.mockResolvedValueOnce(
+      okPage([{ symbol: "BTCUSDT", fundingRate: "0.0001", fundingRateTimestamp: "1700000000000" }])
+    );
+
+    const rates = await client.getFundingHistory("BTCUSDT", 1_700_000_000_000, 1_700_000_000_000);
+
+    expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledTimes(1);
+    expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledWith({
+      category: "linear", symbol: "BTCUSDT", startTime: 1_700_000_000_000, endTime: 1_700_000_000_000, limit: 200,
+    });
+    expect(mockGetFundingRateHistoryAccount).not.toHaveBeenCalled();
+    expect(rates).toEqual([{ fundingTime: 1_700_000_000_000, fundingRate: 0.0001 }]);
+  });
+
+  it("paginates forward across multiple 200-row pages, cursoring by the last timestamp + 1ms", async () => {
+    const fullPage = Array.from({ length: 200 }, (_, i) => ({
+      symbol: "BTCUSDT", fundingRate: "0.0001", fundingRateTimestamp: String(1_700_000_000_000 + i * 60_000),
+    }));
+    const lastPage = [{ symbol: "BTCUSDT", fundingRate: "0.0002", fundingRateTimestamp: "1700000012000000" }];
+    mockGetFundingRateHistoryMarketData
+      .mockResolvedValueOnce(okPage(fullPage))
+      .mockResolvedValueOnce(okPage(lastPage));
+
+    const rates = await client.getFundingHistory("BTCUSDT", 1_700_000_000_000, 1_700_000_020_000_000);
+
+    expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledTimes(2);
+    const secondCallArgs = mockGetFundingRateHistoryMarketData.mock.calls[1]![0] as { startTime: number };
+    expect(secondCallArgs.startTime).toBe(1_700_000_000_000 + 199 * 60_000 + 1);
+    expect(rates.length).toBe(201);
+  });
+
+  it("returns an empty array when there's nothing in range", async () => {
+    mockGetFundingRateHistoryMarketData.mockResolvedValueOnce(okPage([]));
+    const rates = await client.getFundingHistory("BTCUSDT", 1_700_000_000_000, 1_700_000_000_000);
+    expect(rates).toEqual([]);
   });
 });

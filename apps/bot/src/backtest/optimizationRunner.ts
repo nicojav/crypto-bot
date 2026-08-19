@@ -3,6 +3,8 @@ import type { TimeframeId } from "../exchange/bybit.js";
 import type { EngineConfig } from "./engine.js";
 import type { CandleSource } from "./candleStore.js";
 import { ensureCandles } from "./candleStore.js";
+import type { FundingSource } from "./fundingStore.js";
+import { ensureFundingRates } from "./fundingStore.js";
 import { getStrategy, listStrategies } from "./strategies/index.js";
 import { searchCell, CancelledError, DEFAULT_COARSE_BUDGET, DEFAULT_REFINE_OPTIONS, type SearchResult, type SearchOptions } from "./search.js";
 import { BacktestWorkerPool } from "./workerPool.js";
@@ -86,7 +88,7 @@ export function cancelRun(runId: number): boolean {
  */
 export async function runAutoOptimization(
   db: PrismaClient,
-  bybit: CandleSource & InstrumentSource,
+  bybit: CandleSource & InstrumentSource & FundingSource,
   runId: number,
   config: AutoOptimizeConfig,
 ): Promise<void> {
@@ -124,13 +126,17 @@ export async function runAutoOptimization(
       const strategy = getStrategy(cell.strategyId);
       if (!strategy) { cellsDone++; continue; }
 
-      // ensureCandles is I/O-bound (network) only on the first request for a symbol+timeframe
-      // window — subsequent cells sharing that window read straight from the SQLite cache.
-      const candles = await ensureCandles(db, bybit, cell.symbol, cell.timeframe, fromMs, toMs);
+      // ensureCandles/ensureFundingRates are I/O-bound (network) only on the first request for a
+      // given symbol+timeframe (or symbol, for funding) window — subsequent cells sharing that
+      // window read straight from the SQLite cache.
+      const [candles, fundingRates] = await Promise.all([
+        ensureCandles(db, bybit, cell.symbol, cell.timeframe, fromMs, toMs),
+        ensureFundingRates(db, bybit, cell.symbol, fromMs, toMs),
+      ]);
       if (candles.length === 0) { cellsDone++; continue; }
 
       const instrument = await bybit.getInstrumentInfo(cell.symbol);
-      const engineConfig: EngineConfig = { ...config.engine, lotSize: instrument.lotSize, tickSize: instrument.tickSize };
+      const engineConfig: EngineConfig = { ...config.engine, lotSize: instrument.lotSize, tickSize: instrument.tickSize, fundingRates };
 
       const searchOpts: SearchOptions = {
         oosFraction: config.oosFraction,

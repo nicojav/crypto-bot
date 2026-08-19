@@ -68,7 +68,16 @@ function returnsHistogram(trades: readonly BacktestTrade[], binWidthPct = 2.5): 
   return bins;
 }
 
-export function computeStats(trades: readonly BacktestTrade[], equityCurve: readonly EquityPoint[], initialCapital: number): BacktestStats {
+export function computeStats(
+  trades: readonly BacktestTrade[],
+  equityCurve: readonly EquityPoint[],
+  initialCapital: number,
+  /** Precomputed intrabar-aware drawdown from the engine (see engine.ts's trackDrawdown) — more
+   * accurate than deriving it from the close-only equity curve below, since a position can swing
+   * further within a bar than its close reveals. Falls back to the close-based calc when omitted
+   * (e.g. a caller that only has an equity curve, not the engine run that produced it). */
+  drawdownOverride?: { abs: number; pct: number },
+): BacktestStats {
   const finalEquity = equityCurve[equityCurve.length - 1]?.equity ?? initialCapital;
   const totalPnlUsd = finalEquity - initialCapital;
   const totalPnlPct = initialCapital > 0 ? (totalPnlUsd / initialCapital) * 100 : 0;
@@ -80,7 +89,7 @@ export function computeStats(trades: readonly BacktestTrade[], equityCurve: read
   const grossProfit = winners.reduce((sum, t) => sum + t.pnlUsd, 0);
   const grossLoss = Math.abs(losers.reduce((sum, t) => sum + t.pnlUsd, 0));
 
-  const dd = maxDrawdown(equityCurve);
+  const dd = drawdownOverride ? { abs: drawdownOverride.abs, pct: drawdownOverride.pct } : maxDrawdown(equityCurve);
 
   return {
     totalPnlUsd,

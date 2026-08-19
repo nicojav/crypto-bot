@@ -44,6 +44,9 @@ graph TB
     BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, POST optimize,<br/>POST/GET optimize/auto(+cancel/delete),<br/>GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
     CSTORE -->|"getKline (missing ranges only)"| BYBIT_MAINNET["Bybit REST API<br/>(mainnet, public — always real prices,<br/>independent of BYBIT_TESTNET)"]
     CSTORE -->|upsert/read| CANDLE[("Candle")]
+    BTAPI -->|ensureFundingRates| FSTORE["backtest/fundingStore.ts"]
+    FSTORE -->|"getFundingHistory (missing ranges only)"| BYBIT_MAINNET
+    FSTORE -->|upsert/read| FUNDING[("FundingRate")]
     BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets, composable<br/>customMaCross, bbMeanReversion scalper)"]
     STRAT -->|toPine| PINEGEN["backtest/strategies/pineExport.ts"]
 
@@ -51,12 +54,13 @@ graph TB
     POOL -->|"pack once per candle array,<br/>share by reference"| CBUF["backtest/candleBuffer.ts<br/>(columnar SharedArrayBuffer)"]
     POOL -->|postMessage task| WORKER["backtest/backtestWorker.ts<br/>(worker_thread — unpacks candles,<br/>runs strategy.run + engine + stats,<br/>optionally scoreResult)"]
     WORKER -->|runOneBacktest| OPT["backtest/optimizer.ts<br/>(param-sweep + shared run helper)"]
-    OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick)"]
+    OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick;<br/>accrues funding, approximates<br/>liquidation, intrabar drawdown)"]
     ENGINE --> STATS["backtest/stats.ts"]
     WORKER -.->|"scoreResult (score-kind tasks)"| SCORING["backtest/scoring.ts<br/>(Sharpe/Calmar + risk-adjusted<br/>composite score, not raw PnL)"]
 
     BTAPI -->|"detached, single-job lock"| RUNNER["backtest/optimizationRunner.ts<br/>(Strategy Finder background job:<br/>iterates strategy x symbol x timeframe,<br/>one pool for the whole run)"]
     RUNNER -->|ensureCandles| CSTORE
+    RUNNER -->|ensureFundingRates| FSTORE
     RUNNER -->|"searchCell (pool in opts)"| SEARCH["backtest/search.ts<br/>(coarse grid → refine,<br/>in-sample/out-of-sample split + overfit flag)"]
     SEARCH -->|runScored, dispatched concurrently| POOL
     RUNNER -->|"progress + bounded top-N results"| OPTRUN[("OptimizationRun")]

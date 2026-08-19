@@ -1,4 +1,5 @@
 import { RestClientV5, type KlineIntervalV3 } from "bybit-api";
+
 import { env } from "../env.js";
 
 // Timeframes supported by the backtesting tool, mapped to Bybit's kline interval codes.
@@ -62,6 +63,11 @@ export interface Kline {
   low: number;
   close: number;
   volume: number;
+}
+
+export interface FundingRateEntry {
+  fundingTime: number; // ms epoch
+  fundingRate: number; // e.g. 0.0001 = 0.01%; positive = longs pay shorts
 }
 
 export interface ClosedPnLEntry {
@@ -451,6 +457,41 @@ export class BybitClient {
 
       if (batch.length < 1000) break; // exhausted available data in range
       cursorStart = batch[batch.length - 1]!.openTime + intervalMs;
+    }
+
+    return results;
+  }
+
+  /**
+   * Fetch historical funding rate settlements for [startMs, endMs], paginating forward 200
+   * entries/call (Bybit's per-request max for this endpoint). Used by the backtest funding
+   * store — funding interval varies by symbol (not every 8h for every symbol), so unlike
+   * getKline this cursors by the last returned timestamp + 1ms rather than a fixed step. Same
+   * mainnet-only rationale as getKline: real funding history, independent of testnet mode.
+   */
+  async getFundingHistory(symbol: string, startMs: number, endMs: number): Promise<FundingRateEntry[]> {
+    const results: FundingRateEntry[] = [];
+    let cursorStart = startMs;
+
+    while (cursorStart <= endMs) {
+      const res = await withRetry(() =>
+        this.marketDataClient.getFundingRateHistory({ category: "linear", symbol, startTime: cursorStart, endTime: endMs, limit: 200 })
+      );
+      if (res.retCode !== 0) bybitError(res);
+
+      // Bybit returns newest-first; normalise to ascending order.
+      const batch = res.result.list
+        .map((f) => ({
+          fundingTime: Number(f.fundingRateTimestamp),
+          fundingRate: Number(f.fundingRate),
+        }))
+        .sort((a, b) => a.fundingTime - b.fundingTime);
+
+      if (batch.length === 0) break;
+      results.push(...batch);
+
+      if (batch.length < 200) break; // exhausted available data in range
+      cursorStart = batch[batch.length - 1]!.fundingTime + 1;
     }
 
     return results;

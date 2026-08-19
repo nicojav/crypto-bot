@@ -109,6 +109,21 @@ model Candle {
   @@index([symbol, timeframe, openTime])
 }
 
+// Cached funding-rate settlement history for the backtesting tool — downloaded once per symbol
+// from Bybit and accrued against open positions by the engine (see
+// apps/bot/src/backtest/fundingStore.ts, engine.ts's EngineConfig.fundingRates). Unlike Candle
+// this has no timeframe dimension: funding settles on its own schedule (commonly every 8h, but
+// Bybit docs note it varies by symbol) independent of whatever candle timeframe a backtest uses.
+model FundingRate {
+  id          Int    @id @default(autoincrement())
+  symbol      String
+  fundingTime Int    // settlement time, ms epoch
+  fundingRate Float  // e.g. 0.0001 = 0.01%; positive = longs pay shorts
+
+  @@unique([symbol, fundingTime])
+  @@index([symbol, fundingTime])
+}
+
 // Background param-search job runs, started manually from the dashboard's "Strategy Finder"
 // panel (backtest/optimizationRunner.ts) — coarse-grid search + out-of-sample validation
 // across strategy x symbol x timeframe, so results are ranked defensibly rather than by

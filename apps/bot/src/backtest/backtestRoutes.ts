@@ -4,8 +4,9 @@ import type { PrismaClient } from "../generated/prisma/client.js";
 import type { BybitClient, TimeframeId } from "../exchange/bybit.js";
 import { env } from "../env.js";
 import { ensureCandles } from "./candleStore.js";
+import { ensureFundingRates } from "./fundingStore.js";
 import { listStrategies, getStrategy } from "./strategies/index.js";
-import type { EquityPoint } from "./engine.js";
+import type { EquityPoint, FundingRatePoint, BacktestTrade } from "./engine.js";
 import { countCombinations, generateParamCombinations, type SweepParam } from "./optimizer.js";
 import { runAutoOptimization, isOptimizationRunning, cancelRun, getActiveRunId, type AutoOptimizeConfig } from "./optimizationRunner.js";
 import { DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from "./scoring.js";
@@ -133,10 +134,11 @@ const tradeSchema = {
     pnlUsd: { type: "number" },
     pnlPct: { type: "number" },
     feeUsd: { type: "number" },
+    fundingUsd: { type: "number" },
     barsHeld: { type: "integer" },
     exitReason: { type: "string" },
   },
-  required: ["entryTime", "exitTime", "side", "entryPrice", "exitPrice", "qty", "sizeUsd", "pnlUsd", "pnlPct", "feeUsd", "barsHeld", "exitReason"],
+  required: ["entryTime", "exitTime", "side", "entryPrice", "exitPrice", "qty", "sizeUsd", "pnlUsd", "pnlPct", "feeUsd", "fundingUsd", "barsHeld", "exitReason"],
 } as const;
 
 const equityPointSchema = {
@@ -254,6 +256,10 @@ interface RunBody {
   feeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
+  maintenanceMarginRate?: number;
+  /** When true, also runs the opposite fill model and returns its stats alongside the primary
+   * result — see the `fillModelComparison` response field. */
+  compareFillModel?: boolean;
 }
 
 interface CandlesQuery {
@@ -278,6 +284,7 @@ interface OptimizeBody {
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   minTrades?: number;
+  maintenanceMarginRate?: number;
 }
 
 interface AutoOptimizeBody {
@@ -295,6 +302,7 @@ interface AutoOptimizeBody {
   feeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
+  maintenanceMarginRate?: number;
 }
 
 function downsample(points: readonly EquityPoint[], maxPoints: number): EquityPoint[] {
@@ -388,6 +396,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           feeBps:            { type: "number", minimum: 0, default: 5.5 },
           slippageBps:       { type: "number", minimum: 0, default: 2 },
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
+          maintenanceMarginRate: { type: "number", minimum: 0, maximum: 1 },
+          compareFillModel:  { type: "boolean", default: false },
         },
       },
       response: {
@@ -399,6 +409,14 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
             equityCurve: { type: "array", items: equityPointSchema },
             buyHoldCurve: { type: "array", items: equityPointSchema },
             markers: { type: "array", items: markerSchema },
+            fillModelComparison: {
+              type: "object",
+              properties: {
+                fillModel: { type: "string", enum: ["signalClose", "nextOpen"] },
+                stats: statsSchema,
+              },
+              required: ["fillModel", "stats"],
+            },
           },
           required: ["stats", "trades", "equityCurve", "buyHoldCurve", "markers"],
         },
@@ -420,7 +438,10 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       return reply.status(400).send({ error: "Invalid from/to date range" });
     }
 
-    const candles: Candle[] = await ensureCandles(db, bybit, symbol, timeframe, fromMs, toMs);
+    const [candles, fundingRates]: [Candle[], FundingRatePoint[]] = await Promise.all([
+      ensureCandles(db, bybit, symbol, timeframe, fromMs, toMs),
+      ensureFundingRates(db, bybit, symbol, fromMs, toMs),
+    ]);
     if (candles.length === 0) {
       return reply.status(400).send({ error: "No candle data available for this symbol/timeframe/range" });
     }
@@ -436,14 +457,35 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       fillModel: req.body.fillModel ?? "signalClose",
       lotSize: instrument.lotSize,
       tickSize: instrument.tickSize,
-    } as const;
+      maintenanceMarginRate: req.body.maintenanceMarginRate,
+      fundingRates,
+    };
+
+    // signalClose fills at the exact bar it decided on; nextOpen fills one bar later instead.
+    // compareFillModel runs both so that gap is visible rather than a silent default. Note: for
+    // a continuously-traded perpetual (this bot's instruments), a candle's close and the next
+    // candle's open are the same price by construction — there's no session gap the way
+    // traditional/equity markets have overnight ones — so nextOpen typically only shifts entry
+    // *timing* by one bar (entryTime, barsHeld composition) with zero effect on fill price or
+    // PnL. The comparison still has real value for less liquid symbols/timeframes where that
+    // close==nextOpen equality can break down, and for strategies whose brackets are tight
+    // enough that even a same-price, later-time fill changes which bar's high/low a TP/SL check
+    // sees first.
+    const altFillModel: "signalClose" | "nextOpen" = engineConfig.fillModel === "signalClose" ? "nextOpen" : "signalClose";
 
     // Off the main thread — this request used to run the full simulation synchronously inline,
     // which could stall webhook ingestion/reconciliation in this same process for as long as a
     // large candle window took to simulate. See workerPool.ts.
-    const { trades, equityCurve, buyHoldCurve, stats } = await withPool((pool) => pool.runFull(candles, strategy.id, params, engineConfig));
+    const [primary, comparison] = await withPool((pool) =>
+      Promise.all([
+        pool.runFull(candles, strategy.id, params, engineConfig),
+        req.body.compareFillModel ? pool.runFull(candles, strategy.id, params, { ...engineConfig, fillModel: altFillModel }) : null,
+      ]),
+    );
 
-    const markers = trades.flatMap((t) => [
+    const { trades, equityCurve, buyHoldCurve, stats } = primary;
+
+    const markers = trades.flatMap((t: BacktestTrade) => [
       { time: t.entryTime, price: t.entryPrice, kind: t.side === "BUY" ? "long" : "short" },
       { time: t.exitTime, price: t.exitPrice, kind: "exit", exitReason: t.exitReason },
     ]);
@@ -454,6 +496,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       equityCurve: downsample(equityCurve, MAX_CURVE_POINTS),
       buyHoldCurve: downsample(buyHoldCurve, MAX_CURVE_POINTS),
       markers,
+      ...(comparison ? { fillModelComparison: { fillModel: altFillModel, stats: comparison.stats } } : {}),
     };
   });
 
@@ -481,6 +524,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           slippageBps:       { type: "number", minimum: 0, default: 2 },
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
           minTrades:         { type: "integer", minimum: 0, default: 10 },
+          maintenanceMarginRate: { type: "number", minimum: 0, maximum: 1 },
         },
       },
       response: {
@@ -526,7 +570,10 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       return reply.status(400).send({ error: "Invalid from/to date range" });
     }
 
-    const candles: Candle[] = await ensureCandles(db, bybit, symbol, timeframe, fromMs, toMs);
+    const [candles, fundingRates]: [Candle[], FundingRatePoint[]] = await Promise.all([
+      ensureCandles(db, bybit, symbol, timeframe, fromMs, toMs),
+      ensureFundingRates(db, bybit, symbol, fromMs, toMs),
+    ]);
     if (candles.length === 0) {
       return reply.status(400).send({ error: "No candle data available for this symbol/timeframe/range" });
     }
@@ -552,7 +599,9 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       fillModel: req.body.fillModel ?? "signalClose",
       lotSize: instrument.lotSize,
       tickSize: instrument.tickSize,
-    } as const;
+      maintenanceMarginRate: req.body.maintenanceMarginRate,
+      fundingRates,
+    };
     const minTrades = req.body.minTrades ?? 10;
 
     // Off the main thread and dispatched concurrently — this loop used to run every combo
@@ -606,6 +655,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           feeBps:            { type: "number", minimum: 0, default: 5.5 },
           slippageBps:       { type: "number", minimum: 0, default: 2 },
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
+          maintenanceMarginRate: { type: "number", minimum: 0, maximum: 1 },
         },
       },
       response: {
@@ -659,6 +709,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
         feeBps: req.body.feeBps ?? 5.5,
         slippageBps: req.body.slippageBps ?? 2,
         fillModel: req.body.fillModel ?? "signalClose",
+        maintenanceMarginRate: req.body.maintenanceMarginRate,
       },
     };
 

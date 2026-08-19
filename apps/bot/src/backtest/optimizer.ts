@@ -69,7 +69,7 @@ export function runOneBacktest(
   engineConfig: EngineConfig,
 ): OneBacktestResult {
   const signals = strategy.run(candles, params);
-  const { trades, equityCurve, buyHoldCurve } = runBacktestEngine(candles, signals, engineConfig);
-  const stats = computeStats(trades, equityCurve, engineConfig.initialCapital);
+  const { trades, equityCurve, buyHoldCurve, maxDrawdownUsd, maxDrawdownPct } = runBacktestEngine(candles, signals, engineConfig);
+  const stats = computeStats(trades, equityCurve, engineConfig.initialCapital, { abs: maxDrawdownUsd, pct: maxDrawdownPct });
   return { trades, equityCurve, buyHoldCurve, stats };
 }

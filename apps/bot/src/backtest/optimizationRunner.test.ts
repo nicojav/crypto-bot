@@ -8,6 +8,7 @@ import { PrismaClient } from "../generated/prisma/client.js";
 import { runAutoOptimization, cancelRun, isOptimizationRunning, healOrphanedRuns, type AutoOptimizeConfig, type InstrumentSource } from "./optimizationRunner.js";
 import { DEFAULT_SCORE_WEIGHTS } from "./scoring.js";
 import type { CandleSource } from "./candleStore.js";
+import type { FundingSource } from "./fundingStore.js";
 import type { Kline } from "../exchange/bybit.js";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
@@ -32,10 +33,11 @@ function makeCandles(n: number): Kline[] {
   return out;
 }
 
-function makeFakeExchange(klines: Kline[]): CandleSource & InstrumentSource {
+function makeFakeExchange(klines: Kline[]): CandleSource & InstrumentSource & FundingSource {
   return {
     getKline: async () => klines,
     getInstrumentInfo: async () => ({ lotSize: 0.001, tickSize: 0.01 }),
+    getFundingHistory: async () => [],
   };
 }
 
@@ -74,6 +76,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await testDb.candle.deleteMany({});
+  await testDb.fundingRate.deleteMany({});
   await testDb.optimizationRun.deleteMany({});
 });
 
@@ -89,6 +92,28 @@ describe("runAutoOptimization", () => {
     expect(updated?.cellsDone).toBe(1);
     expect(updated?.backtestsRun).toBeGreaterThan(0);
     expect(isOptimizationRunning()).toBe(false);
+  });
+
+  it("fetches funding rates for each cell's symbol and forwards them into the engine", async () => {
+    const fundingCalls: Array<[string, number, number]> = [];
+    const exchange: CandleSource & InstrumentSource & FundingSource = {
+      getKline: async () => makeCandles(CANDLE_COUNT),
+      getInstrumentInfo: async () => ({ lotSize: 0.001, tickSize: 0.01 }),
+      getFundingHistory: async (symbol, startMs, endMs) => {
+        fundingCalls.push([symbol, startMs, endMs]);
+        return [{ fundingTime: startMs, fundingRate: 0.0001 }];
+      },
+    };
+    const run = await testDb.optimizationRun.create({ data: { status: "running", configJson: "{}", cellsTotal: 1 } });
+
+    await runAutoOptimization(testDb, exchange, run.id, baseConfig());
+
+    expect(fundingCalls).toHaveLength(1);
+    expect(fundingCalls[0]![0]).toBe("BTCUSDT");
+
+    const cached = await testDb.fundingRate.findMany({ where: { symbol: "BTCUSDT" } });
+    expect(cached).toHaveLength(1);
+    expect(cached[0]!.fundingRate).toBe(0.0001);
   });
 
   it("rejects a second run while one is active — the single-job lock protecting the live-trading process", async () => {

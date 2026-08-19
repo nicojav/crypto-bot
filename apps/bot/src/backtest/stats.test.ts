@@ -14,6 +14,7 @@ function trade(overrides: Partial<BacktestTrade>): BacktestTrade {
     pnlUsd: 0,
     pnlPct: 0,
     feeUsd: 0,
+    fundingUsd: 0,
     barsHeld: 1,
     exitReason: "tp",
     ...overrides,
