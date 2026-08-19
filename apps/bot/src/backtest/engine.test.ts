@@ -217,4 +217,37 @@ describe("runBacktestEngine", () => {
 
     expect(trades[0]!.fundingUsd).toBe(0);
   });
+
+  it("tracks MAE/MFE from the bar after entry, ignoring the entry bar's own range", () => {
+    // bar0 (entry bar) has a huge range that must NOT count — the position wasn't open for it.
+    const candles = [candle(0, 100, 500, 1, 100), candle(1, 100, 108, 95, 100), candle(2, 100, 100, 100, 100)];
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "long" }];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades[0]!.mfePct).toBeCloseTo(8, 6); // bar1 high 108 vs entry 100
+    expect(trades[0]!.maePct).toBeCloseTo(-5, 6); // bar1 low 95 vs entry 100
+  });
+
+  it("counts the touch price on the exact bar a TP/SL exit happens, not just prior bars", () => {
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 100, 100, 100), candle(2, 100, 100, 80, 90)];
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "long", tpPct: 50, slPct: 20 }]; // sl = 80
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades[0]!.exitReason).toBe("sl");
+    // bar2's low of 80 is both the SL trigger AND the worst excursion — must be reflected in MAE
+    // even though the position closes on this same bar.
+    expect(trades[0]!.maePct).toBeCloseTo(-20, 6);
+  });
+
+  it("tracks MAE/MFE independently for a short position (favorable = price falling)", () => {
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 92, 105, 90, 100), candle(2, 100, 100, 100, 100)];
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "short" }];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades[0]!.mfePct).toBeCloseTo(10, 6); // bar1 low 90 is favorable for a short (100 -> 90 = +10%)
+    expect(trades[0]!.maePct).toBeCloseTo(-5, 6); // bar1 high 105 is adverse for a short (100 -> 105 = -5%)
+  });
 });

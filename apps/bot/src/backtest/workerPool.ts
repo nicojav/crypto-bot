@@ -145,15 +145,15 @@ export class BacktestWorkerPool {
   }
 
   /** Full result (trades + curves + stats) — for a single interactive /run request. */
-  async runFull(candles: readonly Candle[], strategyId: string, params: Record<string, number>, engineConfig: EngineConfig): Promise<FullBacktestResult> {
-    const msg = await this.submit(candles, (taskId, cellId, shared) => ({ kind: "full", taskId, cellId, shared, strategyId, params, engineConfig }));
+  async runFull(candles: readonly Candle[], strategyId: string, params: Record<string, number>, engineConfig: EngineConfig, timeframe: TimeframeId): Promise<FullBacktestResult> {
+    const msg = await this.submit(candles, (taskId, cellId, shared) => ({ kind: "full", taskId, cellId, shared, strategyId, params, engineConfig, timeframe }));
     if (msg.kind !== "full") throw new Error(`Unexpected worker result kind: ${msg.kind}`);
     return msg;
   }
 
   /** Stats only, no curves — for the manual param sweep (/optimize), which only ranks by stats. */
-  async runStats(candles: readonly Candle[], strategyId: string, params: Record<string, number>, engineConfig: EngineConfig): Promise<StatsResult> {
-    const msg = await this.submit(candles, (taskId, cellId, shared) => ({ kind: "stats", taskId, cellId, shared, strategyId, params, engineConfig }));
+  async runStats(candles: readonly Candle[], strategyId: string, params: Record<string, number>, engineConfig: EngineConfig, timeframe: TimeframeId): Promise<StatsResult> {
+    const msg = await this.submit(candles, (taskId, cellId, shared) => ({ kind: "stats", taskId, cellId, shared, strategyId, params, engineConfig, timeframe }));
     if (msg.kind !== "stats") throw new Error(`Unexpected worker result kind: ${msg.kind}`);
     return msg;
   }

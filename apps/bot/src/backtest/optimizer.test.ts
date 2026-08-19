@@ -76,7 +76,7 @@ describe("runOneBacktest", () => {
       fillModel: "signalClose", lotSize: 0.001, tickSize: 0.01,
     };
 
-    const result = runOneBacktest(strategy, candles, {}, config);
+    const result = runOneBacktest(strategy, candles, {}, config, "1d");
 
     expect(result.trades).toHaveLength(1);
     expect(result.stats.totalTrades).toBe(1);

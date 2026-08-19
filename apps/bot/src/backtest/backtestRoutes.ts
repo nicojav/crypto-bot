@@ -112,12 +112,42 @@ const statsSchema = {
         required: ["rangeStart", "rangeEnd", "count"],
       },
     },
+    sharpeRatio: { type: "number" },
+    sortinoRatio: { type: "number" },
+    calmarRatio: { type: "number" },
+    expectancy: { type: ["number", "null"] },
+    exposurePct: { type: "number" },
+    maxConsecutiveLosses: { type: "integer" },
+    exitReasonBreakdown: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          exitReason: { type: "string" },
+          count: { type: "integer" },
+          avgPnlUsd: { type: "number" },
+        },
+        required: ["exitReason", "count", "avgPnlUsd"],
+      },
+    },
+    monthlyReturns: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          month: { type: "string" },
+          returnPct: { type: "number" },
+        },
+        required: ["month", "returnPct"],
+      },
+    },
   },
   required: [
     "totalPnlUsd", "totalPnlPct", "maxDrawdownUsd", "maxDrawdownPct", "totalTrades",
     "winners", "losers", "breakevens", "winRatePct", "profitFactor", "avgPnlUsd",
     "avgPnlPct", "avgBarsHeld", "largestProfitUsd", "largestLossUsd", "avgProfitPct",
-    "avgLossPct", "returnsHistogram",
+    "avgLossPct", "returnsHistogram", "sharpeRatio", "sortinoRatio", "calmarRatio",
+    "expectancy", "exposurePct", "maxConsecutiveLosses", "exitReasonBreakdown", "monthlyReturns",
   ],
 } as const;
 
@@ -137,8 +167,10 @@ const tradeSchema = {
     fundingUsd: { type: "number" },
     barsHeld: { type: "integer" },
     exitReason: { type: "string" },
+    maePct: { type: "number" },
+    mfePct: { type: "number" },
   },
-  required: ["entryTime", "exitTime", "side", "entryPrice", "exitPrice", "qty", "sizeUsd", "pnlUsd", "pnlPct", "feeUsd", "fundingUsd", "barsHeld", "exitReason"],
+  required: ["entryTime", "exitTime", "side", "entryPrice", "exitPrice", "qty", "sizeUsd", "pnlUsd", "pnlPct", "feeUsd", "fundingUsd", "barsHeld", "exitReason", "maePct", "mfePct"],
 } as const;
 
 const equityPointSchema = {
@@ -260,6 +292,10 @@ interface RunBody {
   /** When true, also runs the opposite fill model and returns its stats alongside the primary
    * result — see the `fillModelComparison` response field. */
   compareFillModel?: boolean;
+  /** When true, also runs at 2x slippage and 2x fees and returns its stats alongside the primary
+   * result — see the `sensitivityComparison` response field. A result that survives doubled
+   * costs is far more likely to be a real edge than a fee-model artifact. */
+  sensitivityCheck?: boolean;
 }
 
 interface CandlesQuery {
@@ -398,6 +434,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
           maintenanceMarginRate: { type: "number", minimum: 0, maximum: 1 },
           compareFillModel:  { type: "boolean", default: false },
+          sensitivityCheck:  { type: "boolean", default: false },
         },
       },
       response: {
@@ -416,6 +453,15 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
                 stats: statsSchema,
               },
               required: ["fillModel", "stats"],
+            },
+            sensitivityComparison: {
+              type: "object",
+              properties: {
+                slippageBps: { type: "number" },
+                feeBps: { type: "number" },
+                stats: statsSchema,
+              },
+              required: ["slippageBps", "feeBps", "stats"],
             },
           },
           required: ["stats", "trades", "equityCurve", "buyHoldCurve", "markers"],
@@ -473,13 +519,19 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     // sees first.
     const altFillModel: "signalClose" | "nextOpen" = engineConfig.fillModel === "signalClose" ? "nextOpen" : "signalClose";
 
+    // A result that only looks good at the exact fee/slippage assumptions above is a fee-model
+    // artifact, not an edge. sensitivityCheck re-runs at double both, so that's visible instead
+    // of hidden behind whatever constants happened to be configured.
+    const sensitivityConfig = { ...engineConfig, slippageBps: engineConfig.slippageBps * 2, feeBps: engineConfig.feeBps * 2 };
+
     // Off the main thread — this request used to run the full simulation synchronously inline,
     // which could stall webhook ingestion/reconciliation in this same process for as long as a
     // large candle window took to simulate. See workerPool.ts.
-    const [primary, comparison] = await withPool((pool) =>
+    const [primary, comparison, sensitivity] = await withPool((pool) =>
       Promise.all([
-        pool.runFull(candles, strategy.id, params, engineConfig),
-        req.body.compareFillModel ? pool.runFull(candles, strategy.id, params, { ...engineConfig, fillModel: altFillModel }) : null,
+        pool.runFull(candles, strategy.id, params, engineConfig, timeframe),
+        req.body.compareFillModel ? pool.runFull(candles, strategy.id, params, { ...engineConfig, fillModel: altFillModel }, timeframe) : null,
+        req.body.sensitivityCheck ? pool.runFull(candles, strategy.id, params, sensitivityConfig, timeframe) : null,
       ]),
     );
 
@@ -497,6 +549,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       buyHoldCurve: downsample(buyHoldCurve, MAX_CURVE_POINTS),
       markers,
       ...(comparison ? { fillModelComparison: { fillModel: altFillModel, stats: comparison.stats } } : {}),
+      ...(sensitivity ? { sensitivityComparison: { slippageBps: sensitivityConfig.slippageBps, feeBps: sensitivityConfig.feeBps, stats: sensitivity.stats } } : {}),
     };
   });
 
@@ -608,7 +661,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     // synchronously inline with no yielding, up to MAX_OPTIMIZE_COMBINATIONS in one request.
     let filteredOutCount = 0;
     const allResults = await withPool((pool) =>
-      Promise.all(combos.map((params) => pool.runStats(candles, strategy.id, params, engineConfig).then((r) => ({ params, stats: r.stats })))),
+      Promise.all(combos.map((params) => pool.runStats(candles, strategy.id, params, engineConfig, timeframe).then((r) => ({ params, stats: r.stats })))),
     );
     const evaluated: { params: Record<string, number>; stats: (typeof allResults)[number]["stats"] }[] = [];
     for (const { params, stats } of allResults) {

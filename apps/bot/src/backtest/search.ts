@@ -190,7 +190,7 @@ async function evaluate(
   weights: ScoreWeights,
   opts: SearchOptions,
 ): Promise<{ params: Record<string, number>; score: number; result: ReturnType<typeof runOneBacktest> }> {
-  const result = runOneBacktest(strategy, candles, params, engineConfig);
+  const result = runOneBacktest(strategy, candles, params, engineConfig, timeframe);
   const score = scoreResult(result, timeframe, weights);
 
   opts.onBacktest?.();

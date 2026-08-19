@@ -52,8 +52,8 @@ describe("BacktestWorkerPool", () => {
     "runFull matches the single-threaded runOneBacktest result",
     async () => {
       pool = new BacktestWorkerPool(2);
-      const expected = runOneBacktest(strategy, candles, params, engineConfig);
-      const actual = await pool.runFull(candles, strategy.id, params, engineConfig);
+      const expected = runOneBacktest(strategy, candles, params, engineConfig, "1d");
+      const actual = await pool.runFull(candles, strategy.id, params, engineConfig, "1d");
       expect(actual.stats).toEqual(expected.stats);
       expect(actual.trades).toEqual(expected.trades);
       expect(actual.equityCurve).toEqual(expected.equityCurve);
@@ -65,8 +65,8 @@ describe("BacktestWorkerPool", () => {
     "runStats returns the same stats without curves",
     async () => {
       pool = new BacktestWorkerPool(2);
-      const expected = runOneBacktest(strategy, candles, params, engineConfig);
-      const actual = await pool.runStats(candles, strategy.id, params, engineConfig);
+      const expected = runOneBacktest(strategy, candles, params, engineConfig, "1d");
+      const actual = await pool.runStats(candles, strategy.id, params, engineConfig, "1d");
       expect(actual.stats).toEqual(expected.stats);
     },
     WORKER_TEST_TIMEOUT,
@@ -88,7 +88,7 @@ describe("BacktestWorkerPool", () => {
     async () => {
       pool = new BacktestWorkerPool(4);
       const paramSets = Array.from({ length: 12 }, (_, i) => ({ fastLen: 5 + i, slowLen: 30 }));
-      const results = await Promise.all(paramSets.map((p) => pool!.runStats(candles, strategy.id, p, engineConfig)));
+      const results = await Promise.all(paramSets.map((p) => pool!.runStats(candles, strategy.id, p, engineConfig, "1d")));
       expect(results).toHaveLength(12);
       for (const r of results) expect(r.stats).toBeDefined();
     },
@@ -99,7 +99,7 @@ describe("BacktestWorkerPool", () => {
     "propagates a worker-side error (unknown strategy) as a rejection, not a hang",
     async () => {
       pool = new BacktestWorkerPool(1);
-      await expect(pool.runStats(candles, "not-a-real-strategy", params, engineConfig)).rejects.toThrow(/Unknown strategy/);
+      await expect(pool.runStats(candles, "not-a-real-strategy", params, engineConfig, "1d")).rejects.toThrow(/Unknown strategy/);
     },
     WORKER_TEST_TIMEOUT,
   );
@@ -109,7 +109,7 @@ describe("BacktestWorkerPool", () => {
     async () => {
       const p = new BacktestWorkerPool(1);
       await p.destroy();
-      await expect(p.runStats(candles, strategy.id, params, engineConfig)).rejects.toThrow(/closed/);
+      await expect(p.runStats(candles, strategy.id, params, engineConfig, "1d")).rejects.toThrow(/closed/);
     },
     WORKER_TEST_TIMEOUT,
   );

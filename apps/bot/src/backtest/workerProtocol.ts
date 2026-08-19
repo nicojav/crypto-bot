@@ -33,12 +33,14 @@ interface BaseTask {
   strategyId: string;
   params: Record<string, number>;
   engineConfig: EngineConfig;
+  /** Needed by computeStats to annualize Sharpe/Sortino — every task kind computes stats now. */
+  timeframe: TimeframeId;
 }
 
 export type TaskMessage =
   | (BaseTask & { kind: "full" })
   | (BaseTask & { kind: "stats" })
-  | (BaseTask & { kind: "score"; timeframe: TimeframeId; weights: ScoreWeights });
+  | (BaseTask & { kind: "score"; weights: ScoreWeights });
 
 export type ResultMessage =
   | ({ kind: "full"; taskId: number } & FullBacktestResult)

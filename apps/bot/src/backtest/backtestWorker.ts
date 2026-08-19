@@ -31,7 +31,7 @@ port.on("message", (task: TaskMessage) => {
     if (!strategy) throw new Error(`Unknown strategy: ${task.strategyId}`);
 
     const candles = getCandles(task);
-    const { trades, equityCurve, buyHoldCurve, stats } = runOneBacktest(strategy, candles, task.params, task.engineConfig);
+    const { trades, equityCurve, buyHoldCurve, stats } = runOneBacktest(strategy, candles, task.params, task.engineConfig, task.timeframe);
 
     let result: ResultMessage;
     if (task.kind === "full") {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSharpe, computeCalmar, scoreResult, DEFAULT_SCORE_WEIGHTS } from "./scoring.js";
+import { scoreResult, DEFAULT_SCORE_WEIGHTS } from "./scoring.js";
 import type { EquityPoint } from "./engine.js";
 import type { BacktestStats } from "./stats.js";
 
@@ -20,52 +20,11 @@ function statsWith(overrides: Partial<BacktestStats>): BacktestStats {
     totalPnlUsd: 0, totalPnlPct: 0, maxDrawdownUsd: 0, maxDrawdownPct: 0, totalTrades: 20,
     winners: 0, losers: 0, breakevens: 0, winRatePct: 0, profitFactor: 1, avgPnlUsd: 0,
     avgPnlPct: 0, avgBarsHeld: 0, largestProfitUsd: 0, largestLossUsd: 0, avgProfitPct: 0,
-    avgLossPct: 0, returnsHistogram: [], ...overrides,
+    avgLossPct: 0, returnsHistogram: [], sharpeRatio: 0, sortinoRatio: 0, calmarRatio: 0,
+    expectancy: null, exposurePct: 0, maxConsecutiveLosses: 0, exitReasonBreakdown: [],
+    monthlyReturns: [], ...overrides,
   };
 }
-
-describe("computeSharpe", () => {
-  it("returns 0 for a curve with fewer than 2 points", () => {
-    expect(computeSharpe([{ time: 0, equity: 100 }], "1d")).toBe(0);
-  });
-
-  it("returns 0 for a perfectly flat curve (zero variance)", () => {
-    const curve = curveFromReturns(1000, [0, 0, 0, 0]);
-    expect(computeSharpe(curve, "1d")).toBe(0);
-  });
-
-  it("is positive for a steadily rising curve", () => {
-    const curve = curveFromReturns(1000, [0.01, 0.01, 0.01, 0.01, 0.01]);
-    expect(computeSharpe(curve, "1d")).toBeGreaterThan(0);
-  });
-
-  it("is negative for a steadily falling curve", () => {
-    const curve = curveFromReturns(1000, [-0.01, -0.01, -0.01, -0.01]);
-    expect(computeSharpe(curve, "1d")).toBeLessThan(0);
-  });
-
-  it("rewards the same average return with lower volatility (finer timeframe, same shape)", () => {
-    const smooth = curveFromReturns(1000, [0.01, 0.01, 0.01, 0.01]);
-    const choppy = curveFromReturns(1000, [0.04, -0.02, 0.03, -0.01]); // similar mean, way more variance
-    expect(computeSharpe(smooth, "1d")).toBeGreaterThan(computeSharpe(choppy, "1d"));
-  });
-});
-
-describe("computeCalmar", () => {
-  it("returns 0 when there's no drawdown", () => {
-    const curve = curveFromReturns(1000, [0.01, 0.01, 0.01]);
-    expect(computeCalmar(statsWith({ maxDrawdownPct: 0 }), curve)).toBe(0);
-  });
-
-  it("returns 0 for a curve with fewer than 2 points", () => {
-    expect(computeCalmar(statsWith({ maxDrawdownPct: 10 }), [{ time: 0, equity: 100 }])).toBe(0);
-  });
-
-  it("is positive when equity ends above where it started, despite some drawdown", () => {
-    const curve = curveFromReturns(1000, [0.05, -0.02, 0.05, -0.02, 0.05]);
-    expect(computeCalmar(statsWith({ maxDrawdownPct: 5 }), curve)).toBeGreaterThan(0);
-  });
-});
 
 describe("scoreResult", () => {
   it("gates to 0 below minTrades regardless of how good the curve looks", () => {

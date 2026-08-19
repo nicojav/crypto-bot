@@ -2,6 +2,7 @@ import { runBacktestEngine, type EngineConfig, type BacktestTrade, type EquityPo
 import { computeStats, type BacktestStats } from "./stats.js";
 import type { StrategyDefinition } from "./strategies/types.js";
 import type { Candle } from "./types.js";
+import type { TimeframeId } from "../exchange/bybit.js";
 
 export interface SweepParam {
   param: string;
@@ -67,9 +68,10 @@ export function runOneBacktest(
   candles: readonly Candle[],
   params: Record<string, number>,
   engineConfig: EngineConfig,
+  timeframe: TimeframeId,
 ): OneBacktestResult {
   const signals = strategy.run(candles, params);
   const { trades, equityCurve, buyHoldCurve, maxDrawdownUsd, maxDrawdownPct } = runBacktestEngine(candles, signals, engineConfig);
-  const stats = computeStats(trades, equityCurve, engineConfig.initialCapital, { abs: maxDrawdownUsd, pct: maxDrawdownPct });
+  const stats = computeStats(trades, equityCurve, engineConfig.initialCapital, timeframe, { abs: maxDrawdownUsd, pct: maxDrawdownPct });
   return { trades, equityCurve, buyHoldCurve, stats };
 }

@@ -20,6 +20,13 @@ export interface BacktestTrade {
   fundingUsd: number;
   barsHeld: number;
   exitReason: ExitReason;
+  /** Max adverse excursion — the worst the position's price return got while open, in %.
+   * Negative or zero. Tracked from the bar after entry (the entry bar's own range isn't
+   * counted, since the position wasn't open for all of it) through the bar it exits, inclusive. */
+  maePct: number;
+  /** Max favorable excursion — the best the position's price return got while open, in %.
+   * Positive or zero. Same tracking window as maePct. */
+  mfePct: number;
 }
 
 export interface EquityPoint {
@@ -74,6 +81,9 @@ interface OpenPosition {
   feeOpenUsd: number;
   /** Running total of funding accrued while this position has been open — see FundingRatePoint. */
   fundingPaidUsd: number;
+  /** Running max adverse/favorable price excursion in % — see BacktestTrade.maePct/mfePct. */
+  maePct: number;
+  mfePct: number;
 }
 
 function resolveBracket(signal: SignalEvent, fillPrice: number, tickSize: number): { tp: number | null; sl: number | null } {
@@ -112,7 +122,7 @@ function buildPosition(signal: SignalEvent, rawFillPrice: number, fillTime: numb
   const { tp, sl } = resolveBracket(signal, fillPrice, config.tickSize);
   const liquidationPrice = resolveLiquidationPrice(side, fillPrice, config.leverage, config.maintenanceMarginRate);
   const feeOpenUsd = fillPrice * qty * feeRate;
-  return { side, qty, entryPrice: fillPrice, entryTime: fillTime, entryBarIndex: barIndex, takeProfitPrice: tp, stopLossPrice: sl, liquidationPrice, feeOpenUsd, fundingPaidUsd: 0 };
+  return { side, qty, entryPrice: fillPrice, entryTime: fillTime, entryBarIndex: barIndex, takeProfitPrice: tp, stopLossPrice: sl, liquidationPrice, feeOpenUsd, fundingPaidUsd: 0, maePct: 0, mfePct: 0 };
 }
 
 // TP fills at the exact touched level — no slippage modeled there (optimistic exits aren't the
@@ -149,6 +159,8 @@ function buildTrade(position: OpenPosition, exitPrice: number, exitTime: number,
     fundingUsd: position.fundingPaidUsd,
     barsHeld: exitBarIndex - position.entryBarIndex,
     exitReason,
+    maePct: position.maePct,
+    mfePct: position.mfePct,
   };
 }
 
@@ -206,6 +218,20 @@ export function runBacktestEngine(candles: readonly Candle[], signals: readonly 
   for (let i = 0; i < candles.length; i++) {
     const bar = candles[i]!;
     const positionAtBarStart = position; // what was actually exposed to this bar's high/low range
+
+    // MAE/MFE — update before the liquidation/SL/TP check below, since that check touches this
+    // same bar's high/low; a trade that exits this bar should have the touch price counted as
+    // part of its excursion, not miss it because the position is already closed by the time
+    // equityCurve/drawdown bookkeeping runs at the end of the loop.
+    if (positionAtBarStart) {
+      const favorablePrice = positionAtBarStart.side === "BUY" ? bar.high : bar.low;
+      const adversePrice = positionAtBarStart.side === "BUY" ? bar.low : bar.high;
+      const sign = positionAtBarStart.side === "BUY" ? 1 : -1;
+      const favorablePct = ((favorablePrice - positionAtBarStart.entryPrice) / positionAtBarStart.entryPrice) * sign * 100;
+      const adversePct = ((adversePrice - positionAtBarStart.entryPrice) / positionAtBarStart.entryPrice) * sign * 100;
+      if (favorablePct > positionAtBarStart.mfePct) positionAtBarStart.mfePct = favorablePct;
+      if (adversePct < positionAtBarStart.maePct) positionAtBarStart.maePct = adversePct;
+    }
 
     // Funding settles at fixed wall-clock times regardless of candle boundaries — accrue every
     // settlement up to this bar's open against whatever position is open at that moment. A 1d/1w
