@@ -189,6 +189,18 @@ async function evaluate(
 }
 
 /**
+ * Fingerprint of a backtest's actual outcome (not its params) — a strategy's signals only
+ * change at the candle where an indicator threshold is actually crossed, so on a finite
+ * candle set, many nearby param values (especially within one refine neighborhood) produce
+ * byte-identical trades. Deduping by exact param equality alone lets several of those
+ * "twins" all survive into the finalist list, wasting slots that could've gone to a
+ * genuinely different config. Dedupe on the outcome itself instead.
+ */
+function outcomeKey(stats: BacktestStats): string {
+  return [stats.totalPnlPct, stats.totalTrades, stats.winRatePct, stats.maxDrawdownPct, stats.profitFactor].join("|");
+}
+
+/**
  * Coarse-grid search over one (strategy, symbol, timeframe) cell, refined around the best
  * regions, then validated on out-of-sample data the search never saw. Ranking by in-sample
  * score alone reliably surfaces curve-fit configs — the OOS pass + `overfitFlag` is what
@@ -218,10 +230,10 @@ export async function searchCell(
 
   // ── Coarse pass over in-sample data ────────────────────────────────────────
   const coarseCombos = buildCoarseGrid(strategy, opts.coarseBudget);
-  const coarseScored: { params: Record<string, number>; score: number }[] = [];
+  const coarseScored: { params: Record<string, number>; score: number; stats: BacktestStats }[] = [];
   for (const params of coarseCombos) {
-    const { score } = await evaluate(strategy, isCandles, params, engineConfig, timeframe, opts.scoreWeights, opts);
-    coarseScored.push({ params, score });
+    const { score, result } = await evaluate(strategy, isCandles, params, engineConfig, timeframe, opts.scoreWeights, opts);
+    coarseScored.push({ params, score, stats: result.stats });
     await maybeYield();
   }
   coarseScored.sort((a, b) => b.score - a.score);
@@ -239,22 +251,24 @@ export async function searchCell(
     }
   }
 
-  const refinedScored: { params: Record<string, number>; score: number }[] = [];
+  const refinedScored: { params: Record<string, number>; score: number; stats: BacktestStats }[] = [];
   for (const params of refineCombos) {
-    const { score } = await evaluate(strategy, isCandles, params, engineConfig, timeframe, opts.scoreWeights, opts);
-    refinedScored.push({ params, score });
+    const { score, result } = await evaluate(strategy, isCandles, params, engineConfig, timeframe, opts.scoreWeights, opts);
+    refinedScored.push({ params, score, stats: result.stats });
     await maybeYield();
   }
 
-  // ── Pick finalists (coarse + refined, best score per unique param set) ─────
-  const bestByParams = new Map<string, { params: Record<string, number>; score: number }>();
+  // ── Pick finalists (coarse + refined, best score per distinct outcome) ─────
+  // Deduping by outcome rather than by literal param equality is what actually stops
+  // twin/near-twin configs from crowding out genuinely different ones — see outcomeKey.
+  const bestByOutcome = new Map<string, { params: Record<string, number>; score: number }>();
   for (const c of [...coarseScored, ...refinedScored]) {
     if (c.score <= 0) continue;
-    const key = JSON.stringify(c.params);
-    const existing = bestByParams.get(key);
-    if (!existing || c.score > existing.score) bestByParams.set(key, c);
+    const key = outcomeKey(c.stats);
+    const existing = bestByOutcome.get(key);
+    if (!existing || c.score > existing.score) bestByOutcome.set(key, { params: c.params, score: c.score });
   }
-  const finalists = [...bestByParams.values()].sort((a, b) => b.score - a.score).slice(0, opts.keepTop);
+  const finalists = [...bestByOutcome.values()].sort((a, b) => b.score - a.score).slice(0, opts.keepTop);
 
   // ── Validate finalists on out-of-sample data ────────────────────────────────
   const results: SearchResult[] = [];

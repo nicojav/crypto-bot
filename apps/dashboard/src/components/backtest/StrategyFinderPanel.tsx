@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type FC } from "react";
+import { useEffect, useMemo, useRef, useState, type FC, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -349,6 +350,62 @@ const RunProgress: FC<{
   );
 };
 
+// Themed hover tooltip — a native `title` attribute can't be styled at all (plain OS
+// black-box popup, wrong font, hard corners), and the table's rounded card uses
+// `overflow-hidden` for its corners, which would clip a normally-positioned absolute
+// tooltip the moment it tried to escape the card. Rendered into a portal at `document.body`
+// with `position: fixed` coordinates from the trigger's own bounding rect, so it always
+// draws above everything regardless of any ancestor's overflow/z-index.
+const Tooltip: FC<{ text: string; children: ReactNode; triggerClassName?: string }> = ({
+  text,
+  children,
+  triggerClassName = "cursor-help border-b border-dotted border-text-3/60 pb-px",
+}) => {
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  function show() {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) setPos({ top: rect.top - 8, left: rect.left + rect.width / 2 });
+  }
+  function hide() {
+    setPos(null);
+  }
+
+  return (
+    <span
+      ref={triggerRef}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      tabIndex={0}
+      className={triggerClassName}
+    >
+      {children}
+      {pos &&
+        createPortal(
+          <div
+            role="tooltip"
+            className="pointer-events-none fixed z-50 w-56 -translate-x-1/2 -translate-y-full rounded-lg border border-border bg-card px-3 py-2 text-xs font-normal normal-case leading-relaxed tracking-normal text-text-2 shadow-xl"
+            style={{ top: pos.top, left: pos.left }}
+          >
+            {text}
+            <span className="absolute left-1/2 top-full -mt-1 h-2 w-2 -translate-x-1/2 rotate-45 border-b border-r border-border bg-card" />
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
+};
+
+// Header label with a hover explanation.
+const Th: FC<{ label: string; help?: string; align?: "left" | "right" | "center" }> = ({ label, help, align = "left" }) => (
+  <th className={`data-label px-4 py-2.5 font-normal ${align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left"}`}>
+    {help ? <Tooltip text={help}>{label}</Tooltip> : label}
+  </th>
+);
+
 const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOptimizeCellResult) => void }> = ({ results, onLoad }) => {
   const [copyingKey, setCopyingKey] = useState<string | null>(null);
 
@@ -379,12 +436,36 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
               <th className="data-label px-4 py-2.5 text-left font-normal">Strategy</th>
               <th className="data-label px-4 py-2.5 text-left font-normal">Symbol</th>
               <th className="data-label px-4 py-2.5 text-left font-normal">TF</th>
-              <th className="data-label px-4 py-2.5 text-right font-normal">IS PnL%</th>
-              <th className="data-label px-4 py-2.5 text-right font-normal">OOS PnL%</th>
-              <th className="data-label px-4 py-2.5 text-right font-normal">OOS Win%</th>
-              <th className="data-label px-4 py-2.5 text-right font-normal">OOS Max DD</th>
-              <th className="data-label px-4 py-2.5 text-right font-normal">OOS Trades</th>
-              <th className="data-label px-4 py-2.5 text-center font-normal">Fit</th>
+              <Th
+                label="IS PnL%"
+                align="right"
+                help="In-sample return — performance on the exact data window the search optimized against. Almost always looks better than OOS; shown for comparison only, not to be trusted on its own."
+              />
+              <Th
+                label="OOS PnL%"
+                align="right"
+                help="Out-of-sample return — performance on data the search never touched while searching. This is the number that should drive your decision, not IS PnL%."
+              />
+              <Th
+                label="OOS Win%"
+                align="right"
+                help="Out-of-sample win rate — the percentage of trades that closed profitably during the untouched OOS period."
+              />
+              <Th
+                label="OOS Max DD"
+                align="right"
+                help="Out-of-sample max drawdown — the largest peak-to-trough equity decline during the OOS period. Lower is safer; weigh this against how much drawdown you can actually stomach live."
+              />
+              <Th
+                label="OOS Trades"
+                align="right"
+                help="Number of trades executed during the OOS validation period. Too few makes every other OOS column statistically shaky — be skeptical of results close to your Min trades setting."
+              />
+              <Th
+                label="Fit"
+                align="center"
+                help="Whether the OOS score held up close to in-sample, or collapsed (flagged 'overfit') — the single fastest signal for whether a config will transfer to live trading."
+              />
               <th className="px-4 py-2.5" />
             </tr>
           </thead>
@@ -404,13 +485,13 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
                   <td className="px-4 py-2.5 text-right font-mono text-xs text-text-3">{r.oosStats.totalTrades}</td>
                   <td className="px-4 py-2.5 text-center">
                     {r.overfitFlag ? (
-                      <span title="OOS score collapsed relative to in-sample — likely won't hold up live" className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red/15 text-red whitespace-nowrap">
-                        overfit
-                      </span>
+                      <Tooltip text="OOS score collapsed relative to in-sample — likely won't hold up live" triggerClassName="cursor-help">
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red/15 text-red whitespace-nowrap">overfit</span>
+                      </Tooltip>
                     ) : (
-                      <span title="OOS score held up close to in-sample" className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green/15 text-green whitespace-nowrap">
-                        holds up
-                      </span>
+                      <Tooltip text="OOS score held up close to in-sample" triggerClassName="cursor-help">
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green/15 text-green whitespace-nowrap">holds up</span>
+                      </Tooltip>
                     )}
                   </td>
                   <td className="pr-4 py-2.5 text-right whitespace-nowrap">

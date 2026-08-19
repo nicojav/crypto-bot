@@ -79,6 +79,23 @@ function makeSideStrategy(): StrategyDefinition {
   };
 }
 
+// Same as makeSideStrategy, but with an extra numeric param that run() never reads. Every
+// value of "junk" produces byte-identical trades for a given "side" — a deliberate stand-in
+// for the real-world case (e.g. bbMult=2.0 vs 2.05) where nearby param values just don't
+// cross any indicator threshold differently on a finite candle set.
+function makeSideStrategyWithIgnoredParam(): StrategyDefinition {
+  return {
+    id: "sideIgnored",
+    label: "Side + ignored param",
+    description: "",
+    params: [
+      { name: "side", label: "Side", default: 0, min: 0, max: 1, step: 1, options: ["Long", "Short"] },
+      { name: "junk", label: "Junk", default: 5, min: 0, max: 10, step: 1 },
+    ],
+    run: (candles, params) => (candles.length === 0 ? [] : [{ barIndex: 0, time: candles[0]!.openTime, action: params.side === 1 ? "short" : "long" }]),
+  };
+}
+
 function trendCandles(count: number, startPrice: number, endPrice: number, startTime = 0): Candle[] {
   const candles: Candle[] = [];
   for (let i = 0; i < count; i++) {
@@ -118,6 +135,25 @@ describe("searchCell", () => {
     // x2) stays in the low thousands — nowhere near the ~78,000-per-neighborhood the old
     // uncapped Cartesian product would have produced for this param shape.
     expect(backtestCount).toBeLessThan(2_000);
+  });
+
+  it("collapses outcome-identical param combos into a single finalist instead of filling keepTop with twins (regression: dedup used to be by literal param equality, not outcome)", async () => {
+    // Uptrend throughout, IS and OOS both — every "junk" value ties for the same "side=0"
+    // (long) outcome, so without outcome-dedup, several of the 5 finalist slots would be
+    // consumed by side=0 entries that only differ by an unused param.
+    const candles = trendCandles(45, 100, 140);
+    const opts: SearchOptions = {
+      ...DEFAULT_SEARCH_OPTIONS,
+      oosFraction: 0.3,
+      minTrades: 1,
+      scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
+      keepTop: 5,
+    };
+
+    const results = await searchCell(makeSideStrategyWithIgnoredParam(), candles, "1d", ENGINE, opts);
+
+    const signatures = results.map((r) => `${r.isStats.totalPnlPct}|${r.isStats.totalTrades}|${r.oosStats.totalPnlPct}|${r.oosStats.totalTrades}`);
+    expect(new Set(signatures).size).toBe(signatures.length);
   });
 });
 
