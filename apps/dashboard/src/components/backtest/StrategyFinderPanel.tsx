@@ -72,8 +72,9 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
   const [strategyIds, setStrategyIds] = useState<Set<string>>(new Set());
   const [from, setFrom] = useState(defaultFrom);
   const [to, setTo] = useState(defaultTo);
-  const [oosFraction, setOosFraction] = useState("0.3");
-  const [minTrades, setMinTrades] = useState("10");
+  const [validateFraction, setValidateFraction] = useState("0.15");
+  const [holdoutFraction, setHoldoutFraction] = useState("0.15");
+  const [minTrades, setMinTrades] = useState("30");
   const [initialCapital, setInitialCapital] = useState("10000");
   const [maxPositionUsd, setMaxPositionUsd] = useState("1000");
   const [leverage, setLeverage] = useState("5");
@@ -167,7 +168,8 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       strategyIds: [...strategyIds],
       from: new Date(`${from}T00:00:00Z`).toISOString(),
       to: new Date(`${to}T23:59:59Z`).toISOString(),
-      oosFraction: Number(oosFraction) || 0.3,
+      validateFraction: Number(validateFraction) || 0.15,
+      holdoutFraction: Number(holdoutFraction) || 0.15,
       minTrades: Number(minTrades) || 10,
       initialCapital: Number(initialCapital) || 10_000,
       maxPositionUsd: Number(maxPositionUsd) || 1_000,
@@ -196,8 +198,8 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
         <h2 className="font-semibold text-text-1">Strategy Finder</h2>
         <p className="text-xs text-text-3 mt-1 max-w-2xl">
           Coarse-grid search, refined around the best regions, across every selected strategy x symbol x
-          timeframe. Ranked by an out-of-sample risk-adjusted score — the search never sees the last slice of
-          data, so a config that only looks good in-sample gets flagged, not recommended.
+          timeframe. Configs are chosen on a validate slice the search never trained on, then reported on a
+          holdout slice that never influences the choice — that holdout number is the one to trust.
         </p>
       </div>
 
@@ -243,7 +245,8 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Field label="Out-of-sample" type="number" min="0.05" step="0.05" value={oosFraction} onChange={setOosFraction} hint="fraction held out" />
+        <Field label="Validate" type="number" min="0.05" step="0.05" value={validateFraction} onChange={setValidateFraction} hint="fraction used to select" />
+        <Field label="Holdout" type="number" min="0.05" step="0.05" value={holdoutFraction} onChange={setHoldoutFraction} hint="fraction, never selects" />
         <Field label="Min trades" type="number" min="0" value={minTrades} onChange={setMinTrades} hint="to rank a config" />
         <Field label="Initial capital" type="number" min="0" value={initialCapital} onChange={setInitialCapital} hint="USDT" />
         <Field label="Margin / trade" type="number" min="0" value={maxPositionUsd} onChange={setMaxPositionUsd} hint="USDT" />
@@ -377,8 +380,9 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
   return (
     <div className="bg-surface border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-2.5 text-xs text-text-3 border-b border-border">
-        Top {results.length} ranked by out-of-sample score. IS columns show in-sample (optimized-on) performance
-        for comparison — OOS is what actually validates the config.
+        Top {results.length} ranked by validate score. Train shows in-sample (optimized-on) performance for
+        comparison — Holdout is the number that actually validates the config, since it never influenced the
+        ranking.
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -389,34 +393,44 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
               <th className="data-label px-4 py-2.5 text-left font-normal">Symbol</th>
               <th className="data-label px-4 py-2.5 text-left font-normal">TF</th>
               <Th
-                label="IS PnL%"
+                label="Train PnL%"
                 align="right"
-                help="In-sample return — performance on the exact data window the search optimized against. Almost always looks better than OOS; shown for comparison only, not to be trusted on its own."
+                help="In-sample return — performance on the exact data window the search optimized against. Almost always looks better than validate/holdout; shown for comparison only, not to be trusted on its own."
               />
               <Th
-                label="OOS PnL%"
+                label="Validate PnL%"
                 align="right"
-                help="Out-of-sample return — performance on data the search never touched while searching. This is the number that should drive your decision, not IS PnL%."
+                help="Performance on the slice used to choose this config from a shortlist of candidates. Out-of-sample relative to training, but it IS selection data — it drove the ranking, so it can still be optimistic."
               />
               <Th
-                label="OOS Win%"
+                label="Holdout PnL%"
                 align="right"
-                help="Out-of-sample win rate — the percentage of trades that closed profitably during the untouched OOS period."
+                help="Performance on data that never influenced training or selection in any way. This is the number that should actually drive your decision."
               />
               <Th
-                label="OOS Max DD"
+                label="Holdout Win%"
                 align="right"
-                help="Out-of-sample max drawdown — the largest peak-to-trough equity decline during the OOS period. Lower is safer; weigh this against how much drawdown you can actually stomach live."
+                help="Win rate during the untouched holdout period."
               />
               <Th
-                label="OOS Trades"
+                label="Holdout Max DD"
                 align="right"
-                help="Number of trades executed during the OOS validation period. Too few makes every other OOS column statistically shaky — be skeptical of results close to your Min trades setting."
+                help="Largest peak-to-trough equity decline during the holdout period. Lower is safer; weigh this against how much drawdown you can actually stomach live."
+              />
+              <Th
+                label="Holdout Trades"
+                align="right"
+                help="Number of trades executed during the holdout period. Too few makes every other holdout column statistically shaky — be skeptical of results close to your Min trades setting."
               />
               <Th
                 label="Fit"
                 align="center"
-                help="Whether the OOS score held up close to in-sample, or collapsed (flagged 'overfit') — the single fastest signal for whether a config will transfer to live trading."
+                help="Holdout score ÷ train score, as a percentage. 100% means the edge fully held up on untouched data; 0% or below means it didn't transfer at all. Replaces a plain overfit/holds-up flag with the actual magnitude."
+              />
+              <Th
+                label="Combos"
+                align="right"
+                help="How many distinct param combinations this cell's search actually evaluated. A winner picked out of a few thousand combos deserves more skepticism than one out of a few dozen — pure luck gets more chances to look good the wider the search."
               />
               <th className="px-4 py-2.5" />
             </tr>
@@ -424,28 +438,30 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
           <tbody>
             {results.map((r, i) => {
               const key = `${r.strategyId}-${r.symbol}-${r.timeframe}-${i}`;
+              const fitPct = r.holdoutRatio * 100;
+              const fitClass =
+                fitPct >= 70 ? "bg-green/15 text-green" : fitPct >= 30 ? "bg-amber/15 text-amber" : "bg-red/15 text-red";
+              const fitLabel = fitPct >= 70 ? "holds up" : fitPct >= 30 ? "caution" : "overfit";
               return (
                 <tr key={key} className="border-b border-border/50 hover:bg-card/50 transition-colors">
                   <td className="px-4 py-2.5 font-mono text-xs text-text-3">{i + 1}</td>
                   <td className="px-4 py-2.5 text-xs text-text-1 whitespace-nowrap">{r.strategyId}</td>
                   <td className="px-4 py-2.5 font-mono text-xs text-text-1">{r.symbol}</td>
                   <td className="px-4 py-2.5 font-mono text-xs text-text-2">{r.timeframe}</td>
-                  <td className={`px-4 py-2.5 text-right font-mono text-xs ${pnlColor(r.isStats.totalPnlPct)}`}>{signedPct(r.isStats.totalPnlPct)}</td>
-                  <td className={`px-4 py-2.5 text-right font-mono text-xs font-medium ${pnlColor(r.oosStats.totalPnlPct)}`}>{signedPct(r.oosStats.totalPnlPct)}</td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs text-text-2">{fmtPct.format(r.oosStats.winRatePct)}%</td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs text-red">{fmtPct.format(r.oosStats.maxDrawdownPct)}%</td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs text-text-3">{r.oosStats.totalTrades}</td>
+                  <td className={`px-4 py-2.5 text-right font-mono text-xs ${pnlColor(r.trainStats.totalPnlPct)}`}>{signedPct(r.trainStats.totalPnlPct)}</td>
+                  <td className={`px-4 py-2.5 text-right font-mono text-xs ${pnlColor(r.validateStats.totalPnlPct)}`}>{signedPct(r.validateStats.totalPnlPct)}</td>
+                  <td className={`px-4 py-2.5 text-right font-mono text-xs font-medium ${pnlColor(r.holdoutStats.totalPnlPct)}`}>{signedPct(r.holdoutStats.totalPnlPct)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-text-2">{fmtPct.format(r.holdoutStats.winRatePct)}%</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-red">{fmtPct.format(r.holdoutStats.maxDrawdownPct)}%</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-text-3">{r.holdoutStats.totalTrades}</td>
                   <td className="px-4 py-2.5 text-center">
-                    {r.overfitFlag ? (
-                      <Tooltip text="OOS score collapsed relative to in-sample — likely won't hold up live" triggerClassName="cursor-help">
-                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red/15 text-red whitespace-nowrap">overfit</span>
-                      </Tooltip>
-                    ) : (
-                      <Tooltip text="OOS score held up close to in-sample" triggerClassName="cursor-help">
-                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green/15 text-green whitespace-nowrap">holds up</span>
-                      </Tooltip>
-                    )}
+                    <Tooltip text={`Holdout ÷ train = ${fmtPct.format(fitPct)}%`} triggerClassName="cursor-help">
+                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded whitespace-nowrap ${fitClass}`}>
+                        {fitLabel} ({fmtPct.format(fitPct)}%)
+                      </span>
+                    </Tooltip>
                   </td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-text-3">{r.combosEvaluated}</td>
                   <td className="pr-4 py-2.5 text-right whitespace-nowrap">
                     <button
                       onClick={() => onLoad(r)}

@@ -357,11 +357,17 @@ export type AutoOptimizeCellResult = {
   symbol: string;
   timeframe: BacktestTimeframe;
   params: Record<string, number>;
-  isStats: BacktestStats;
-  oosStats: BacktestStats;
-  isScore: number;
-  oosScore: number;
-  overfitFlag: boolean;
+  trainStats: BacktestStats;
+  validateStats: BacktestStats;
+  holdoutStats: BacktestStats;
+  trainScore: number;
+  validateScore: number;
+  holdoutScore: number;
+  /** validateScore / trainScore — this is what the finalist was actually selected on. */
+  validateRatio: number;
+  /** holdoutScore / trainScore — genuinely untouched by selection; the trustworthy number. */
+  holdoutRatio: number;
+  combosEvaluated: number;
 };
 
 export type AutoOptimizeRunStatus = "running" | "done" | "error" | "cancelled";
@@ -391,7 +397,8 @@ export const startAutoOptimize = (body: {
   strategyIds?: string[];
   from: string;
   to: string;
-  oosFraction?: number;
+  validateFraction?: number;
+  holdoutFraction?: number;
   minTrades?: number;
   scoreWeights?: Partial<ScoreWeights>;
   initialCapital?: number;
