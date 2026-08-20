@@ -249,13 +249,22 @@ const cellResultSchema = {
     symbol: { type: "string" },
     timeframe: { type: "string" },
     params: { type: "object", additionalProperties: { type: "number" } },
-    isStats: statsSchema,
-    oosStats: statsSchema,
-    isScore: { type: "number" },
-    oosScore: { type: "number" },
-    overfitFlag: { type: "boolean" },
+    trainStats: statsSchema,
+    validateStats: statsSchema,
+    holdoutStats: statsSchema,
+    trainScore: { type: "number" },
+    validateScore: { type: "number" },
+    holdoutScore: { type: "number" },
+    validateRatio: { type: "number" },
+    holdoutRatio: { type: "number" },
+    combosEvaluated: { type: "integer" },
   },
-  required: ["strategyId", "symbol", "timeframe", "params", "isStats", "oosStats", "isScore", "oosScore", "overfitFlag"],
+  required: [
+    "strategyId", "symbol", "timeframe", "params",
+    "trainStats", "validateStats", "holdoutStats",
+    "trainScore", "validateScore", "holdoutScore",
+    "validateRatio", "holdoutRatio", "combosEvaluated",
+  ],
 } as const;
 
 const autoOptimizeRunSchema = {
@@ -329,7 +338,8 @@ interface AutoOptimizeBody {
   strategyIds?: string[];
   from: string;
   to: string;
-  oosFraction?: number;
+  validateFraction?: number;
+  holdoutFraction?: number;
   minTrades?: number;
   scoreWeights?: Partial<ScoreWeights>;
   initialCapital?: number;
@@ -699,8 +709,9 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           strategyIds:       { type: "array", items: { type: "string" } },
           from:              { type: "string" },
           to:                { type: "string" },
-          oosFraction:       { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.3 },
-          minTrades:         { type: "integer", minimum: 0, default: 10 },
+          validateFraction:  { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.15 },
+          holdoutFraction:   { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.15 },
+          minTrades:         { type: "integer", minimum: 0, default: 30 },
           scoreWeights:      scoreWeightsSchema,
           initialCapital:    { type: "number", exclusiveMinimum: 0, default: 10_000 },
           maxPositionUsd:    { type: "number", exclusiveMinimum: 0, default: 1_000 },
@@ -746,14 +757,21 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       return reply.status(400).send({ error: "Invalid from/to date range" });
     }
 
+    const validateFraction = req.body.validateFraction ?? 0.15;
+    const holdoutFraction = req.body.holdoutFraction ?? 0.15;
+    if (validateFraction + holdoutFraction >= 1) {
+      return reply.status(400).send({ error: "validateFraction + holdoutFraction must leave room for a training set (sum < 1)" });
+    }
+
     const config: AutoOptimizeConfig = {
       symbols: req.body.symbols.map((s) => s.toUpperCase()),
       timeframes: req.body.timeframes as TimeframeId[],
       strategyIds,
       from: req.body.from,
       to: req.body.to,
-      oosFraction: req.body.oosFraction ?? 0.3,
-      minTrades: req.body.minTrades ?? 10,
+      validateFraction,
+      holdoutFraction,
+      minTrades: req.body.minTrades ?? 30,
       scoreWeights: { ...DEFAULT_SCORE_WEIGHTS, ...req.body.scoreWeights },
       engine: {
         initialCapital: req.body.initialCapital ?? 10_000,

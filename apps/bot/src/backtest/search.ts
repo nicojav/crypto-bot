@@ -1,5 +1,6 @@
 import { runOneBacktest } from "./optimizer.js";
 import { scoreResult, DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from "./scoring.js";
+import { mulberry32, hashSeed, latinHypercube } from "./sampling.js";
 import type { EngineConfig } from "./engine.js";
 import type { StrategyDefinition, StrategyParamDef } from "./strategies/types.js";
 import type { Candle } from "./types.js";
@@ -39,106 +40,136 @@ function isVisible(p: StrategyParamDef, combo: Record<string, number>): boolean 
   return !p.showIf || combo[p.showIf.param] === p.showIf.equals;
 }
 
-/** Coarse candidate values for one param — every discrete index for an enum, an evenly-spaced sample for a numeric range. */
-function coarseValuesFor(p: StrategyParamDef, maxValues: number): number[] {
-  if (isEnumParam(p)) {
-    const values: number[] = [];
+/** Maps an LHS [0,1) sample to a value within [min, max], snapped to the param's own step grid
+ * (aligned to the param's own min, not the window's min, so refined values still look "clean"
+ * relative to the param's natural step, e.g. 12/14/16 rather than 11.3/13.3/15.3). */
+function sampleParamValue(u: number, min: number, max: number, param: StrategyParamDef): number {
+  if (max <= min) return roundTo(min);
+  const raw = min + u * (max - min);
+  const step = Math.max(param.step, 1e-9);
+  const snapped = param.min + Math.round((raw - param.min) / step) * step;
+  return roundTo(Math.min(max, Math.max(min, snapped)));
+}
+
+/** Cartesian product of every enum param's discrete option indices, each entry a "branch" of
+ * the param space that showIf-gated numeric params get evaluated against. Small by
+ * construction — the strategies here have at most a couple of 2-3-option enum params — so this
+ * never needs its own budget cap. */
+function enumBranches(strategy: StrategyDefinition): Record<string, number>[] {
+  const defaults = Object.fromEntries(strategy.params.map((p) => [p.name, p.default]));
+  let branches: Record<string, number>[] = [{ ...defaults }];
+  for (const p of strategy.params) {
+    if (!isEnumParam(p)) continue;
     const step = Math.max(p.step, 1);
+    const values: number[] = [];
     for (let v = p.min; v <= p.max; v += step) values.push(roundTo(v));
-    return values;
+    const next: Record<string, number>[] = [];
+    for (const b of branches) for (const v of values) next.push({ ...b, [p.name]: v });
+    branches = next;
   }
-  const span = p.max - p.min;
-  if (span <= 0 || p.step <= 0) return [p.default];
-
-  const count = Math.max(2, Math.min(maxValues, Math.floor(span / p.step) + 1));
-  const rawStep = span / (count - 1);
-  const stepMultiple = Math.max(p.step, Math.round(rawStep / p.step) * p.step);
-
-  const values: number[] = [];
-  for (let v = p.min; v < p.max - 1e-9; v += stepMultiple) values.push(roundTo(v));
-  values.push(roundTo(p.max));
-  return [...new Set(values)];
+  return branches;
 }
 
 /**
  * Builds a bounded coarse grid over a strategy's full param schema — brute-forcing every
  * combination is infeasible (a strategy like bbMeanReversion has enough numeric params at
- * fine steps to produce billions of combos). Enum params (`options`) are expanded across
- * their few discrete indices (structural choices, e.g. TP/SL mode); a param gated by
- * `showIf` only varies in branches where its gate holds, and stays at its default
- * everywhere else — this avoids wasting budget tuning a param the strategy isn't even using
- * in that branch. Truncation (once the mid-build size exceeds the cap) is deterministic —
- * same strategy + budget always yields the same grid — not random sampling.
+ * fine steps to produce billions of combos). Enum params (`options`) are fully expanded across
+ * their few discrete indices (structural choices, e.g. TP/SL mode) into "branches"; within each
+ * branch, the numeric params currently visible under that branch's showIf gates are sampled
+ * *jointly* via Latin Hypercube sampling (see sampling.ts) rather than each param being sampled
+ * independently and the results Cartesian-expanded then truncated to the budget. That older
+ * approach kept whichever combinations happened to come first in iteration order once the cap
+ * was hit mid-expansion — which systematically favored low values of later-processed params and
+ * left whole regions of the space completely unvisited, an artifact of `strategy.params`'
+ * declaration order rather than anything about the strategy itself. LHS has no such bias: the
+ * budget directly is the sample count, spread evenly across the joint space.
+ *
+ * Deterministic — same strategy + budget always yields the same grid (seeded from the
+ * strategy's own id), not truly random.
  */
 export function buildCoarseGrid(strategy: StrategyDefinition, budget: GridBudget = DEFAULT_COARSE_BUDGET): Record<string, number>[] {
-  const defaults = Object.fromEntries(strategy.params.map((p) => [p.name, p.default]));
+  const branches = enumBranches(strategy);
+  const rng = mulberry32(hashSeed(strategy.id));
 
-  let combos: Record<string, number>[] = [{ ...defaults }];
-  for (const p of strategy.params) {
-    const next: Record<string, number>[] = [];
-    for (const combo of combos) {
-      if (!isVisible(p, combo)) {
-        next.push(combo); // hidden in this branch — leave at default, don't multiply
-        continue;
-      }
-      for (const v of coarseValuesFor(p, budget.maxValuesPerParam)) next.push({ ...combo, [p.name]: v });
+  const combos: Record<string, number>[] = [];
+  for (const branch of branches) {
+    const numericParams = strategy.params.filter((p) => !isEnumParam(p) && isVisible(p, branch));
+    if (numericParams.length === 0) {
+      combos.push({ ...branch });
+      continue;
     }
-    // Cap after every param so the intermediate size never runs away before the final slice.
-    combos = next.length > budget.maxCombosPerCell ? next.slice(0, budget.maxCombosPerCell) : next;
+    const budgetShare = Math.floor(budget.maxCombosPerCell / branches.length);
+    const resolutionCap = budget.maxValuesPerParam * numericParams.length;
+    const count = Math.max(1, Math.min(budgetShare, resolutionCap));
+
+    const points = latinHypercube(count, numericParams.length, rng);
+    for (const point of points) {
+      const combo = { ...branch };
+      numericParams.forEach((p, i) => {
+        combo[p.name] = sampleParamValue(point[i]!, p.min, p.max, p);
+      });
+      combos.push(combo);
+    }
   }
 
   return combos.slice(0, budget.maxCombosPerCell);
 }
 
-/** Evenly-spaced sample within a windowed [min, max] sub-range, honoring the param's own step so values stay clean. */
-function refineValuesFor(min: number, max: number, count: number, paramStep: number): number[] {
-  if (max <= min) return [roundTo(min)];
-  const step = Math.max(paramStep, (max - min) / (Math.max(2, count) - 1));
-  const values: number[] = [];
-  for (let v = min; v < max - 1e-9; v += step) values.push(roundTo(v));
-  values.push(roundTo(max));
-  return [...new Set(values)];
-}
-
 /**
- * Builds a finer grid around one coarse winner, refining only the numeric params currently
- * visible in that combo. Uses the same incremental per-param capping as buildCoarseGrid
- * (not a one-shot Cartesian product) — a strategy can have several numeric params
- * simultaneously visible (e.g. RSI confirm + ATR TP/SL both "on" at once), and an uncapped
- * product there blows up combinatorially (5 values^7 params ≈ 78,000, times every coarse
- * winner being refined) even though each individual param only samples a few points.
+ * Builds a finer LHS sample around one coarse winner, over only the numeric params currently
+ * visible in that combo, within a ± (step × window) neighborhood of each. Same joint-sampling
+ * rationale as buildCoarseGrid — a strategy can have several numeric params simultaneously
+ * visible (e.g. RSI confirm + ATR TP/SL both "on" at once), and independently sampling each
+ * then Cartesian-expanding blows up combinatorially (5 values^7 params ≈ 78,000 per coarse
+ * winner) even though each individual param only samples a few points.
  */
-function refineAround(strategy: StrategyDefinition, base: Record<string, number>, opts: RefineOptions): Record<string, number>[] {
+function refineAround(strategy: StrategyDefinition, base: Record<string, number>, opts: RefineOptions, rng: () => number): Record<string, number>[] {
   const numericParams = strategy.params.filter((p) => !isEnumParam(p) && isVisible(p, base));
+  if (numericParams.length === 0) return [{ ...base }];
 
-  let combos: Record<string, number>[] = [{ ...base }];
-  for (const p of numericParams) {
+  const ranges = numericParams.map((p) => {
     const value = base[p.name] ?? p.default;
     const span = p.step * opts.window;
-    const min = Math.max(p.min, value - span);
-    const max = Math.min(p.max, value + span);
-    const values = refineValuesFor(min, max, opts.valuesPerParam, p.step);
+    return { min: Math.max(p.min, value - span), max: Math.min(p.max, value + span) };
+  });
 
-    const next: Record<string, number>[] = [];
-    for (const combo of combos) {
-      for (const v of values) next.push({ ...combo, [p.name]: v });
-    }
-    combos = next.length > opts.maxCombosPerNeighborhood ? next.slice(0, opts.maxCombosPerNeighborhood) : next;
-  }
-
-  return combos;
+  const count = Math.max(1, Math.min(opts.maxCombosPerNeighborhood, opts.valuesPerParam * numericParams.length));
+  const points = latinHypercube(count, numericParams.length, rng);
+  return points.map((point) => {
+    const combo = { ...base };
+    numericParams.forEach((p, i) => {
+      const { min, max } = ranges[i]!;
+      combo[p.name] = sampleParamValue(point[i]!, min, max, p);
+    });
+    return combo;
+  });
 }
 
 export interface SearchOptions {
-  /** Fraction of candles (taken from the end) held out as out-of-sample validation data. */
-  oosFraction: number;
+  /** Fraction of candles (taken from the end, after the validate slice) held out as the holdout
+   * set — evaluated only for the finalists ultimately chosen, and never used to rank or select
+   * anything. This is the only genuinely out-of-sample number in the result. */
+  holdoutFraction: number;
+  /** Fraction of candles (taken from the end, before the holdout slice) held out as the validate
+   * set — used to choose which shortlisted configs become the final `keepTop` finalists. It is
+   * out-of-sample relative to training, but it IS selection data, not a holdout: it drives the
+   * final ranking, same as `oosFraction` used to. */
+  validateFraction: number;
   coarseBudget: GridBudget;
   refineOptions: RefineOptions;
   /** How many top coarse-scoring configs to build refine neighborhoods around. */
   topKToRefine: number;
-  /** How many final (IS-refined) configs to validate on OOS and return. */
+  /** How many train-ranked candidates advance to the validate pass. Deliberately wider than
+   * `keepTop` — cutting to `keepTop` by train score before validate would just relocate the
+   * selection pressure from holdout to train instead of removing it; validate needs a real pool
+   * to choose from. */
+  shortlistSize: number;
+  /** How many validate-ranked finalists to return (each also evaluated on holdout for reporting). */
   keepTop: number;
-  minTrades: number;
+  /** Minimum sample size for a config to score above 0 lives on `scoreWeights.minTrades` (read
+   * inside `scoreResult`) — there is deliberately no separate `minTrades` here. A prior version
+   * of this type had both, and only `scoreWeights.minTrades` was ever actually consulted, so a
+   * caller setting the top-level one alone silently had no effect. */
   scoreWeights: ScoreWeights;
   /** Yield to the event loop (setImmediate) every N backtests — keeps the live trading loop ticking. */
   yieldEvery: number;
@@ -159,12 +190,13 @@ export interface SearchOptions {
 }
 
 export const DEFAULT_SEARCH_OPTIONS: SearchOptions = {
-  oosFraction: 0.3,
+  holdoutFraction: 0.15,
+  validateFraction: 0.15,
   coarseBudget: DEFAULT_COARSE_BUDGET,
   refineOptions: DEFAULT_REFINE_OPTIONS,
   topKToRefine: 5,
+  shortlistSize: 20,
   keepTop: 5,
-  minTrades: 10,
   scoreWeights: DEFAULT_SCORE_WEIGHTS,
   yieldEvery: 25,
 };
@@ -173,12 +205,27 @@ export class CancelledError extends Error {}
 
 export interface SearchResult {
   params: Record<string, number>;
-  isStats: BacktestStats;
-  oosStats: BacktestStats;
-  isScore: number;
-  oosScore: number;
-  /** True when the OOS score collapses relative to IS — the config likely won't transfer to live trading. */
-  overfitFlag: boolean;
+  trainStats: BacktestStats;
+  validateStats: BacktestStats;
+  holdoutStats: BacktestStats;
+  trainScore: number;
+  validateScore: number;
+  holdoutScore: number;
+  /** validateScore / trainScore — how much of the in-sample edge survived on the set that
+   * actually drove selection. Near 1 held up; near/below 0 didn't. trainScore is always > 0 for
+   * a finalist, so this division is safe. */
+  validateRatio: number;
+  /** holdoutScore / trainScore — the true out-of-sample check. This set never influenced which
+   * finalists were kept or how they were ranked, unlike validateRatio. Replaces the old boolean
+   * overfitFlag (which only ever looked at a single magic 0.3 threshold on the same data used
+   * for selection) with a number that carries how *much* the edge held up, on data that's
+   * actually untouched. */
+  holdoutRatio: number;
+  /** How many distinct param combos this cell's coarse + refine passes actually evaluated —
+   * context for how much selection pressure a single winner survived (a winner out of 2,000
+   * combos should be trusted less than one out of 20). Same value across every finalist from one
+   * cell. */
+  combosEvaluated: number;
 }
 
 async function evaluate(
@@ -247,14 +294,23 @@ async function evaluateBatch(
  * genuinely different config. Dedupe on the outcome itself instead.
  */
 function outcomeKey(stats: BacktestStats): string {
-  return [stats.totalPnlPct, stats.totalTrades, stats.winRatePct, stats.maxDrawdownPct, stats.profitFactor].join("|");
+  // Rounded to 6dp before joining — unrounded floats let two configs whose trades are
+  // economically identical but differ by ~1e-13 of accumulated rounding error (e.g. two "junk"
+  // param values that never change any decision, just float noise from evaluation order) both
+  // survive dedup as if they were genuinely distinct outcomes.
+  const round = (v: number) => roundTo(v, 6);
+  const pf = stats.profitFactor === null ? "null" : round(stats.profitFactor);
+  return [round(stats.totalPnlPct), stats.totalTrades, round(stats.winRatePct), round(stats.maxDrawdownPct), pf].join("|");
 }
 
 /**
  * Coarse-grid search over one (strategy, symbol, timeframe) cell, refined around the best
- * regions, then validated on out-of-sample data the search never saw. Ranking by in-sample
- * score alone reliably surfaces curve-fit configs — the OOS pass + `overfitFlag` is what
- * makes a result defensible enough to trade. Operates on already-fetched candles; the caller
+ * regions, then selected on a validate split and reported on a holdout split the search never
+ * saw and never selects on. Three-way split (train / validate / holdout), chronological in that
+ * order — holdout is always the most recent slice, closest to "if this went live today". Ranking
+ * by train score alone reliably surfaces curve-fit configs; ranking the *final* result by
+ * validate (rather than by train, or worse, by the holdout meant to be untouched) is what makes
+ * a result defensible enough to trade. Operates on already-fetched candles; the caller
  * (optimizationRunner.ts) owns candle fetching and DB/progress persistence.
  */
 export async function searchCell(
@@ -264,10 +320,12 @@ export async function searchCell(
   engineConfig: EngineConfig,
   opts: SearchOptions = DEFAULT_SEARCH_OPTIONS,
 ): Promise<SearchResult[]> {
-  const splitIdx = Math.floor(candles.length * (1 - opts.oosFraction));
-  const isCandles = candles.slice(0, splitIdx);
-  const oosCandles = candles.slice(splitIdx);
-  if (isCandles.length === 0 || oosCandles.length === 0) return [];
+  const trainEnd = Math.floor(candles.length * (1 - opts.validateFraction - opts.holdoutFraction));
+  const validateEnd = Math.floor(candles.length * (1 - opts.holdoutFraction));
+  const trainCandles = candles.slice(0, trainEnd);
+  const validateCandles = candles.slice(trainEnd, validateEnd);
+  const holdoutCandles = candles.slice(validateEnd);
+  if (trainCandles.length === 0 || validateCandles.length === 0 || holdoutCandles.length === 0) return [];
 
   let evaluatedSinceYield = 0;
   async function maybeYield() {
@@ -278,17 +336,20 @@ export async function searchCell(
     }
   }
 
-  // ── Coarse pass over in-sample data ────────────────────────────────────────
+  // ── Coarse pass over training data ──────────────────────────────────────────
   const coarseCombos = buildCoarseGrid(strategy, opts.coarseBudget);
-  const coarseScored = await evaluateBatch(strategy, isCandles, coarseCombos, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
+  const coarseScored = await evaluateBatch(strategy, trainCandles, coarseCombos, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
   coarseScored.sort((a, b) => b.score - a.score);
 
   // ── Refine pass: zoom in around the best coarse regions ────────────────────
   const topCoarse = coarseScored.filter((c) => c.score > 0).slice(0, opts.topKToRefine);
   const seen = new Set(coarseScored.map((c) => JSON.stringify(c.params)));
   const refineCombos: Record<string, number>[] = [];
+  // One rng shared across every neighborhood (not reseeded per winner) — still fully
+  // deterministic for a given strategy+candles+options, just advancing through one sequence.
+  const refineRng = mulberry32(hashSeed(`${strategy.id}:refine`));
   for (const c of topCoarse) {
-    for (const params of refineAround(strategy, c.params, opts.refineOptions)) {
+    for (const params of refineAround(strategy, c.params, opts.refineOptions, refineRng)) {
       const key = JSON.stringify(params);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -296,41 +357,54 @@ export async function searchCell(
     }
   }
 
-  const refinedScored = await evaluateBatch(strategy, isCandles, refineCombos, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
+  const refinedScored = await evaluateBatch(strategy, trainCandles, refineCombos, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
+  const combosEvaluated = coarseCombos.length + refineCombos.length;
 
-  // ── Pick finalists (coarse + refined, best score per distinct outcome) ─────
+  // ── Shortlist by train score (coarse + refined, best score per distinct outcome) ───────────
   // Deduping by outcome rather than by literal param equality is what actually stops
-  // twin/near-twin configs from crowding out genuinely different ones — see outcomeKey.
-  const bestByOutcome = new Map<string, { params: Record<string, number>; score: number }>();
+  // twin/near-twin configs from crowding out genuinely different ones — see outcomeKey. This is
+  // a shortlist, not the final finalist set: cutting straight to `keepTop` here (by train score)
+  // would leave validate nothing real to select among.
+  const bestByOutcome = new Map<string, { params: Record<string, number>; score: number; stats: BacktestStats }>();
   for (const c of [...coarseScored, ...refinedScored]) {
     if (c.score <= 0) continue;
     const key = outcomeKey(c.stats);
     const existing = bestByOutcome.get(key);
-    if (!existing || c.score > existing.score) bestByOutcome.set(key, { params: c.params, score: c.score });
+    if (!existing || c.score > existing.score) bestByOutcome.set(key, { params: c.params, score: c.score, stats: c.stats });
   }
-  const finalists = [...bestByOutcome.values()].sort((a, b) => b.score - a.score).slice(0, opts.keepTop);
+  const shortlist = [...bestByOutcome.values()].sort((a, b) => b.score - a.score).slice(0, opts.shortlistSize);
 
-  // ── Validate finalists on out-of-sample data ────────────────────────────────
-  const finalistParams = finalists.map((f) => f.params);
-  const [isResults, oosResults] = await Promise.all([
-    evaluateBatch(strategy, isCandles, finalistParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield),
-    evaluateBatch(strategy, oosCandles, finalistParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield),
-  ]);
+  // ── Select on validate: this is the pass that actually decides the final ranking ───────────
+  const shortlistParams = shortlist.map((s) => s.params);
+  const validateResults = await evaluateBatch(strategy, validateCandles, shortlistParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
 
-  const results: SearchResult[] = finalists.map((f, i) => {
-    const is = isResults[i]!;
-    const oos = oosResults[i]!;
-    const overfitFlag = is.score > 0 && (oos.score <= 0 || oos.score < is.score * 0.3);
+  const ranked = shortlist
+    .map((s, i) => {
+      const validate = validateResults[i]!;
+      return { params: s.params, trainScore: s.score, trainStats: s.stats, validateScore: validate.score, validateStats: validate.stats };
+    })
+    .sort((a, b) => b.validateScore - a.validateScore)
+    .slice(0, opts.keepTop);
+
+  // ── Report on holdout — evaluated only for the already-chosen finalists, purely for the
+  // record; it never feeds back into ranking or which configs made the cut. ────────────────────
+  const holdoutParams = ranked.map((r) => r.params);
+  const holdoutResults = await evaluateBatch(strategy, holdoutCandles, holdoutParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
+
+  // Already in validateScore-descending order via `ranked` — holdout must never re-sort this.
+  return ranked.map((r, i) => {
+    const holdout = holdoutResults[i]!;
     return {
-      params: f.params,
-      isStats: is.stats,
-      oosStats: oos.stats,
-      isScore: is.score,
-      oosScore: oos.score,
-      overfitFlag,
+      params: r.params,
+      trainStats: r.trainStats,
+      validateStats: r.validateStats,
+      holdoutStats: holdout.stats,
+      trainScore: r.trainScore,
+      validateScore: r.validateScore,
+      holdoutScore: holdout.score,
+      validateRatio: r.validateScore / r.trainScore,
+      holdoutRatio: holdout.score / r.trainScore,
+      combosEvaluated,
     };
   });
-
-  results.sort((a, b) => b.oosScore - a.oosScore);
-  return results;
 }

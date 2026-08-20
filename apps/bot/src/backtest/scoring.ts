@@ -18,7 +18,10 @@ export const DEFAULT_SCORE_WEIGHTS: ScoreWeights = {
   profitFactorWeight: 0.5,
   pnlWeight: 0.5,
   drawdownPenalty: 1,
-  minTrades: 10,
+  // 30 is the usual rule-of-thumb floor for treating a sample as roughly normal — 10 let win
+  // rate, profit factor, and drawdown all swing on a handful of trades, which is exactly the
+  // kind of noise the search is supposed to be filtering out, not ranking on.
+  minTrades: 30,
 };
 
 export interface ScorableResult {
@@ -42,7 +45,12 @@ export function scoreResult(
   if (stats.totalTrades < weights.minTrades) return 0;
 
   const sharpe = computeSharpe(equityCurve, timeframe);
-  const profitFactor = stats.profitFactor === null ? 5 : Math.min(stats.profitFactor, 5);
+  // A null profitFactor means zero losing trades — an undefined ratio, not "infinite edge". On a
+  // small sample that's just as likely to be a lucky streak as real skill, so it shouldn't hand
+  // out the same max score as a real, computed 5.0 ratio (which needed actual losses to divide
+  // against). Scale it up with trade count instead: it only reaches the cap once "no losers" has
+  // survived enough trades to actually mean something.
+  const profitFactor = stats.profitFactor === null ? Math.min(5, stats.totalTrades / 6) : Math.min(stats.profitFactor, 5);
   const pnlComponent = stats.totalPnlPct / 100;
 
   const raw =

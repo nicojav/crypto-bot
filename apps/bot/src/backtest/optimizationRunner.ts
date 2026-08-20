@@ -21,7 +21,8 @@ export interface AutoOptimizeConfig {
   strategyIds: string[];
   from: string;
   to: string;
-  oosFraction: number;
+  validateFraction: number;
+  holdoutFraction: number;
   minTrades: number;
   scoreWeights: ScoreWeights;
   engine: Omit<EngineConfig, "lotSize" | "tickSize">;
@@ -139,13 +140,18 @@ export async function runAutoOptimization(
       const engineConfig: EngineConfig = { ...config.engine, lotSize: instrument.lotSize, tickSize: instrument.tickSize, fundingRates };
 
       const searchOpts: SearchOptions = {
-        oosFraction: config.oosFraction,
+        validateFraction: config.validateFraction,
+        holdoutFraction: config.holdoutFraction,
         coarseBudget: DEFAULT_COARSE_BUDGET,
         refineOptions: DEFAULT_REFINE_OPTIONS,
         topKToRefine: 5,
+        shortlistSize: 20,
         keepTop: 5,
-        minTrades: config.minTrades,
-        scoreWeights: config.scoreWeights,
+        // config.minTrades is the one knob callers set; scoreResult only ever reads
+        // scoreWeights.minTrades, so it's folded in here rather than passed alongside it —
+        // previously both existed independently and only the scoreWeights one actually did
+        // anything, so a caller setting just config.minTrades had it silently ignored.
+        scoreWeights: { ...config.scoreWeights, minTrades: config.minTrades },
         yieldEvery: 25,
         onBacktest: () => { backtestsRun++; },
         isCancelled,
@@ -154,7 +160,9 @@ export async function runAutoOptimization(
 
       const cellResults = await searchCell(strategy, candles, cell.timeframe, engineConfig, searchOpts);
       allResults.push(...cellResults.map((r) => ({ ...r, strategyId: cell.strategyId, symbol: cell.symbol, timeframe: cell.timeframe })));
-      allResults.sort((a, b) => b.oosScore - a.oosScore);
+      // Ranking the cross-cell top-N by validateScore (not holdoutScore) keeps holdout free of
+      // selection pressure globally too — the same reasoning as searchCell's own final sort.
+      allResults.sort((a, b) => b.validateScore - a.validateScore);
       allResults = allResults.slice(0, MAX_STORED_RESULTS);
 
       cellsDone++;

@@ -25,7 +25,33 @@ const gatedStrategy: StrategyDefinition = {
   run: () => [],
 };
 
+// Three numeric params, each with 5 candidate values (step 2 across [0,8]), and a budget that
+// only affords 20 combos. The old Cartesian-expand-then-slice(0, cap) implementation hit the cap
+// while still expanding the *second* param, so the third param's values 1-4 were carried in every
+// surviving combo but the first param never got past its first value — whole dimensions were
+// starved. LHS must give every dimension real coverage regardless of processing order.
+const threeNumericParamsStrategy: StrategyDefinition = {
+  id: "threeNumeric",
+  label: "Three Numeric",
+  description: "",
+  params: [
+    { name: "p0", label: "P0", default: 0, min: 0, max: 8, step: 2 },
+    { name: "p1", label: "P1", default: 0, min: 0, max: 8, step: 2 },
+    { name: "p2", label: "P2", default: 0, min: 0, max: 8, step: 2 },
+  ],
+  run: () => [],
+};
+
 describe("buildCoarseGrid", () => {
+  it("gives every numeric param real coverage even under a tight combo budget (no starved dimensions)", () => {
+    const combos = buildCoarseGrid(threeNumericParamsStrategy, { maxCombosPerCell: 20, maxValuesPerParam: 5 });
+    for (const name of ["p0", "p1", "p2"] as const) {
+      const values = new Set(combos.map((c) => c[name]));
+      expect(values.size).toBeGreaterThan(1);
+    }
+  });
+
+
   it("expands an enum param across every discrete option", () => {
     const combos = buildCoarseGrid(gatedStrategy, { maxCombosPerCell: 500, maxValuesPerParam: 5 });
     const modes = new Set(combos.map((c) => c.mode));
@@ -125,58 +151,59 @@ describe("searchCell", () => {
     let backtestCount = 0;
     const opts: SearchOptions = {
       ...DEFAULT_SEARCH_OPTIONS,
-      oosFraction: 0.3,
-      minTrades: 1,
+      validateFraction: 0.15,
+      holdoutFraction: 0.15,
       scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
       onBacktest: () => { backtestCount++; },
     };
 
     await searchCell(manyNumericParamsStrategy, candles, "1d", ENGINE, opts);
 
-    // Coarse (<=200) + refine (5 neighborhoods, each capped at 200) + validation (<=5 finalists
-    // x2) stays in the low thousands — nowhere near the ~78,000-per-neighborhood the old
-    // uncapped Cartesian product would have produced for this param shape.
+    // Coarse (<=200) + refine (5 neighborhoods, each capped at 200) + validate (<=shortlistSize
+    // 20) + holdout (<=keepTop 5) stays in the low thousands — nowhere near the
+    // ~78,000-per-neighborhood the old uncapped Cartesian product would have produced for this
+    // param shape.
     expect(backtestCount).toBeLessThan(2_000);
   });
 
   it("collapses outcome-identical param combos into a single finalist instead of filling keepTop with twins (regression: dedup used to be by literal param equality, not outcome)", async () => {
-    // Uptrend throughout, IS and OOS both — every "junk" value ties for the same "side=0"
+    // Uptrend throughout train/validate/holdout — every "junk" value ties for the same "side=0"
     // (long) outcome, so without outcome-dedup, several of the 5 finalist slots would be
     // consumed by side=0 entries that only differ by an unused param.
     const candles = trendCandles(45, 100, 140);
     const opts: SearchOptions = {
       ...DEFAULT_SEARCH_OPTIONS,
-      oosFraction: 0.3,
-      minTrades: 1,
+      validateFraction: 0.15,
+      holdoutFraction: 0.15,
       scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
       keepTop: 5,
     };
 
     const results = await searchCell(makeSideStrategyWithIgnoredParam(), candles, "1d", ENGINE, opts);
 
-    const signatures = results.map((r) => `${r.isStats.totalPnlPct}|${r.isStats.totalTrades}|${r.oosStats.totalPnlPct}|${r.oosStats.totalTrades}`);
+    const signatures = results.map((r) => `${r.trainStats.totalPnlPct}|${r.trainStats.totalTrades}|${r.validateStats.totalPnlPct}|${r.validateStats.totalTrades}`);
     expect(new Set(signatures).size).toBe(signatures.length);
   });
 });
 
 describe("searchCell overfit detection", () => {
-  it("returns an empty array when there aren't enough candles for both an IS and OOS split", () => {
-    const opts: SearchOptions = { ...DEFAULT_SEARCH_OPTIONS, oosFraction: 0.3 };
+  it("returns an empty array when there aren't enough candles for a train/validate/holdout split", () => {
+    const opts: SearchOptions = { ...DEFAULT_SEARCH_OPTIONS, validateFraction: 0.15, holdoutFraction: 0.15 };
     return searchCell(makeSideStrategy(), [], "1d", ENGINE, opts).then((results) => {
       expect(results).toEqual([]);
     });
   });
 
-  it("picks the config that's profitable in-sample, and flags it as overfit when it fails out-of-sample", async () => {
-    // IS: strong uptrend (long wins). OOS: strong downtrend (that same long loses badly).
-    const isCandles = trendCandles(30, 100, 140);
-    const oosCandles = trendCandles(15, 140, 90, 30 * 60_000);
-    const candles = [...isCandles, ...oosCandles];
+  it("picks the config that's profitable in training, and shows a collapsed validateRatio when it fails out-of-sample", async () => {
+    // Train: strong uptrend (long wins). Validate + holdout: strong downtrend (that same long loses badly).
+    const trainCandles = trendCandles(30, 100, 140);
+    const oosCandles = trendCandles(20, 140, 80, 30 * 60_000);
+    const candles = [...trainCandles, ...oosCandles];
 
     const opts: SearchOptions = {
       ...DEFAULT_SEARCH_OPTIONS,
-      oosFraction: oosCandles.length / candles.length,
-      minTrades: 1,
+      validateFraction: 0.5 * (oosCandles.length / candles.length),
+      holdoutFraction: 0.5 * (oosCandles.length / candles.length),
       scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
     };
 
@@ -184,22 +211,23 @@ describe("searchCell overfit detection", () => {
 
     expect(results.length).toBeGreaterThan(0);
     const top = results[0]!;
-    expect(top.params.side).toBe(0); // long — the only config profitable on the IS uptrend
-    expect(top.isScore).toBeGreaterThan(0);
-    expect(top.oosScore).toBeLessThan(0); // the same long position loses on the OOS downtrend
-    expect(top.overfitFlag).toBe(true);
+    expect(top.params.side).toBe(0); // long — the only config profitable on the training uptrend
+    expect(top.trainScore).toBeGreaterThan(0);
+    expect(top.validateScore).toBeLessThan(0); // the same long position loses on the validate downtrend
+    expect(top.validateRatio).toBeLessThan(0); // collapsed relative to train — the ratio replaces the old boolean overfitFlag
+    expect(top.combosEvaluated).toBeGreaterThan(0);
   });
 
   it("counts every backtest run via onBacktest and honors isCancelled by throwing CancelledError", async () => {
-    const isCandles = trendCandles(20, 100, 110);
-    const oosCandles = trendCandles(10, 110, 105, 20 * 60_000);
-    const candles = [...isCandles, ...oosCandles];
+    const trainCandles = trendCandles(20, 100, 110);
+    const oosCandles = trendCandles(14, 110, 105, 20 * 60_000);
+    const candles = [...trainCandles, ...oosCandles];
 
     let backtestCount = 0;
     const countingOpts: SearchOptions = {
       ...DEFAULT_SEARCH_OPTIONS,
-      oosFraction: oosCandles.length / candles.length,
-      minTrades: 1,
+      validateFraction: 0.5 * (oosCandles.length / candles.length),
+      holdoutFraction: 0.5 * (oosCandles.length / candles.length),
       scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
       onBacktest: () => { backtestCount++; },
     };
@@ -235,8 +263,8 @@ describe("searchCell with a worker pool", () => {
       const candles = oscillatingCandles(200);
       const baseOpts: SearchOptions = {
         ...DEFAULT_SEARCH_OPTIONS,
-        oosFraction: 0.3,
-        minTrades: 1,
+        validateFraction: 0.15,
+        holdoutFraction: 0.15,
         scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
       };
 
@@ -247,8 +275,8 @@ describe("searchCell with a worker pool", () => {
 
       expect(viaPool.length).toBe(inProcess.length);
       expect(viaPool.map((r) => r.params)).toEqual(inProcess.map((r) => r.params));
-      expect(viaPool.map((r) => r.isStats.totalPnlPct)).toEqual(inProcess.map((r) => r.isStats.totalPnlPct));
-      expect(viaPool.map((r) => r.overfitFlag)).toEqual(inProcess.map((r) => r.overfitFlag));
+      expect(viaPool.map((r) => r.trainStats.totalPnlPct)).toEqual(inProcess.map((r) => r.trainStats.totalPnlPct));
+      expect(viaPool.map((r) => r.validateRatio)).toEqual(inProcess.map((r) => r.validateRatio));
     },
     30_000,
   );
@@ -258,7 +286,13 @@ describe("searchCell with a worker pool", () => {
     async () => {
       pool = new BacktestWorkerPool(1);
       const unregistered: StrategyDefinition = { ...makeSideStrategy(), id: "not-in-the-registry" };
-      const opts: SearchOptions = { ...DEFAULT_SEARCH_OPTIONS, oosFraction: 0.3, minTrades: 1, pool };
+      const opts: SearchOptions = {
+        ...DEFAULT_SEARCH_OPTIONS,
+        validateFraction: 0.15,
+        holdoutFraction: 0.15,
+        scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
+        pool,
+      };
 
       await expect(searchCell(unregistered, trendCandles(20, 100, 110), "1d", ENGINE, opts)).rejects.toThrow();
     },

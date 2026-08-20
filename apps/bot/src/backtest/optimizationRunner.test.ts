@@ -48,9 +48,12 @@ function baseConfig(overrides: Partial<AutoOptimizeConfig> = {}): AutoOptimizeCo
     strategyIds: ["emaCross"],
     from: new Date(0).toISOString(),
     to: new Date((CANDLE_COUNT - 1) * DAY_MS).toISOString(),
-    oosFraction: 0.3,
+    validateFraction: 0.15,
+    holdoutFraction: 0.15,
+    // The single authoritative knob — runAutoOptimization folds this into scoreWeights.minTrades
+    // itself, so it doesn't need (and shouldn't get) a separate override here too.
     minTrades: 1,
-    scoreWeights: { ...DEFAULT_SCORE_WEIGHTS, minTrades: 1 },
+    scoreWeights: DEFAULT_SCORE_WEIGHTS,
     engine: { initialCapital: 1_000, maxPositionUsd: 100, leverage: 1, feeBps: 0, slippageBps: 0, fillModel: "signalClose" },
     ...overrides,
   };
