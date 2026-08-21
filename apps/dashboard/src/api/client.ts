@@ -424,3 +424,40 @@ export const cancelAutoOptimizeRun = (runId: number) =>
 
 export const deleteAutoOptimizeRun = (runId: number) =>
   req<{ deleted: boolean }>(`/api/backtest/optimize/auto/${runId}`, { method: "DELETE" });
+
+// ── Storage (DB size tracking + candle/funding-rate cache prune) ───────────
+
+export type StorageTableStats = {
+  rowCount: number;
+  /** ms epoch of the earliest cached row, or null when the table is empty. */
+  oldest: number | null;
+  /** ms epoch of the most recent cached row, or null when the table is empty. */
+  newest: number | null;
+};
+
+export type StorageStats = {
+  dbSizeBytes: number;
+  volumeSizeBytes: number;
+  percentUsed: number;
+  criticalThresholdPct: number;
+  candles: StorageTableStats;
+  fundingRates: StorageTableStats;
+};
+
+export const fetchStorageStats = () => req<StorageStats>("/api/storage/stats");
+
+export type PruneCandlesResult = { dryRun: boolean; candles: number; fundingRates: number };
+
+export const previewPruneCandles = (params: { olderThanDays: number; symbol?: string; timeframe?: BacktestTimeframe }) => {
+  const q = new URLSearchParams({ olderThanDays: String(params.olderThanDays) });
+  if (params.symbol) q.set("symbol", params.symbol);
+  if (params.timeframe) q.set("timeframe", params.timeframe);
+  return req<PruneCandlesResult>(`/api/storage/candles?${q}`, { method: "DELETE" });
+};
+
+export const pruneCandles = (params: { olderThanDays: number; symbol?: string; timeframe?: BacktestTimeframe }) => {
+  const q = new URLSearchParams({ olderThanDays: String(params.olderThanDays), confirm: "true" });
+  if (params.symbol) q.set("symbol", params.symbol);
+  if (params.timeframe) q.set("timeframe", params.timeframe);
+  return req<PruneCandlesResult>(`/api/storage/candles?${q}`, { method: "DELETE" });
+};
