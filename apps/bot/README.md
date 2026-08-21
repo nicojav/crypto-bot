@@ -33,6 +33,14 @@ graph TB
     API -->|reads/writes| BOT[("Bot")]
 
     BUS["eventBus.ts<br/>(EventEmitter)"] --> WSS["ws.ts<br/>(WS server)"]
+    BUS --> NOTIFIER["notifications/notifier.ts<br/>(Telegram)"]
+
+    STORAGEMON["storage/storageMonitor.ts<br/>(periodic, 6h)"] -->|getStorageStats| CANDLE
+    STORAGEMON -->|getStorageStats| FUNDING
+    STORAGEMON -. "publishes storage.critical<br/>(24h cooldown)" .-> BUS
+    STORAGEAPI["storage/storageRoutes.ts<br/>(GET stats, DELETE candles)"] -->|reads/prunes| CANDLE
+    STORAGEAPI -->|reads/prunes| FUNDING
+    DASH -->|REST| STORAGEAPI
 
     DASH["apps/dashboard"] -->|REST| API
     DASH -->|WebSocket| WSS
@@ -61,7 +69,7 @@ graph TB
     BTAPI -->|"detached, single-job lock"| RUNNER["backtest/optimizationRunner.ts<br/>(Strategy Finder background job:<br/>iterates strategy x symbol x timeframe,<br/>one pool for the whole run)"]
     RUNNER -->|ensureCandles| CSTORE
     RUNNER -->|ensureFundingRates| FSTORE
-    RUNNER -->|"searchCell (pool in opts)"| SEARCH["backtest/search.ts<br/>(coarse grid → refine,<br/>in-sample/out-of-sample split + overfit flag)"]
+    RUNNER -->|"searchCell (pool in opts)"| SEARCH["backtest/search.ts<br/>(coarse grid → refine, LHS sampling,<br/>train/validate/holdout split,<br/>optional walk-forward folds)"]
     SEARCH -->|runScored, dispatched concurrently| POOL
     RUNNER -->|"progress + bounded top-N results"| OPTRUN[("OptimizationRun")]
     DASH -->|REST| BTAPI
@@ -107,10 +115,16 @@ instead of running inline in the request:
    its gate holds), scores every combo with `scoring.ts`'s risk-adjusted `scoreResult`
    (Sharpe/Calmar/profit-factor, not raw PnL%), then **refines** a finer grid around the best
    regions.
-3. Candles are split into in-sample/out-of-sample chunks up front — the search only ever
-   optimizes on the in-sample slice, then re-runs each finalist on the untouched
-   out-of-sample slice and flags it `overfitFlag: true` if the OOS score collapses relative
-   to IS. This is what makes a result defensible enough to trade, not just a good backtest.
+3. Candles are split into three chronological chunks up front — **train** (search optimizes
+   here), **validate** (a shortlist is re-scored here; this is what actually decides the final
+   ranking), and **holdout** (evaluated only for the already-chosen finalists, purely for
+   reporting — it never influences selection). `validateRatio`/`holdoutRatio` (validate or
+   holdout score ÷ train score) replace a magic-threshold boolean flag with a number that
+   carries how much the edge actually held up. An opt-in walk-forward mode
+   (`SearchOptions.walkForward`) splits the validate window into rolling folds and ranks on
+   their mean score instead of one continuous-period number, so a config can't hide behind a
+   good blended average. This is what makes a result defensible enough to trade, not just a
+   good backtest.
 4. Progress and a bounded top-N ranked result set are persisted to `OptimizationRun` as the
    run progresses, so `GET /api/backtest/optimize/auto/:runId` can be polled mid-run. A
    module-level single-job lock (this process also runs live trading) rejects a second run
@@ -125,6 +139,25 @@ instead of running inline in the request:
    process owns that id), so cancel always gives the user a way out rather than requiring
    another restart. `DELETE /api/backtest/optimize/auto/:runId` removes a finished run from
    history (409s if it's still the active run — cancel it first).
+
+## Storage
+
+The whole SQLite file (live trading tables and the backtest `Candle`/`FundingRate` cache) lives
+on a single 1 GB Railway Volume. Live trading tables grow slowly and predictably; the backtest
+cache grows unbounded — every new symbol/timeframe/date-range backtested adds rows forever, with
+nothing pruning it otherwise, which is a hard failure risk for live trading if it ever crowds out
+the volume.
+
+- `storage/dbStats.ts` reports total DB file size against the configured volume ceiling
+  (`DB_VOLUME_SIZE_BYTES`, defaults to 1 GB) plus row counts/date coverage for `Candle` and
+  `FundingRate`, and provides the count/delete pair behind the manual prune route.
+- `storage/storageMonitor.ts` checks usage every 6h and publishes a `storage.critical` event
+  (picked up by `notifications/notifier.ts` for Telegram, and broadcast to the dashboard over the
+  existing WS pipe) once usage crosses `DB_CRITICAL_THRESHOLD_PCT` (default 85%) — at most once
+  per 24h while it stays critical, so a long-running critical state doesn't spam.
+- `storage/storageRoutes.ts` exposes `GET /api/storage/stats` and a dry-run-unless-`confirm=true`
+  `DELETE /api/storage/candles` (same shape as the existing `DELETE /api/reset-trade-data`) for
+  the dashboard's Storage panel to preview-then-confirm a prune.
 
 ## Manual scripts
 

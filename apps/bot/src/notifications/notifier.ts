@@ -66,6 +66,14 @@ export class Notifier {
         }
         break;
       }
+      case "storage.critical": {
+        const { dbSizeBytes, volumeSizeBytes, percentUsed } = event.data;
+        const gb = (n: number) => (n / 1_073_741_824).toFixed(2);
+        await this.send(
+          `⚠️ Database storage critical\n${gb(dbSizeBytes)} GB / ${gb(volumeSizeBytes)} GB (${percentUsed.toFixed(1)}%) — review the dashboard's Storage panel to prune old backtest candle data.`
+        );
+        break;
+      }
     }
   }
 

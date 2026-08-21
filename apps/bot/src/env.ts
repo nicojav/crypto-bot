@@ -17,6 +17,11 @@ const schema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().default(""),
   TELEGRAM_CHAT_ID: z.string().default(""),
   DAILY_SUMMARY_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(8),
+  // Matches the documented Railway Volume size (plans/phase-09-deployment/RAILWAY.md) — the
+  // whole SQLite file (live trading + backtest cache) lives on this one disk, so this is what
+  // storage/dbStats.ts measures usage against, not an arbitrary limit.
+  DB_VOLUME_SIZE_BYTES: z.coerce.number().int().positive().default(1_073_741_824),
+  DB_CRITICAL_THRESHOLD_PCT: z.coerce.number().min(0).max(100).default(85),
 });
 
 const result = schema.safeParse(process.env);

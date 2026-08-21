@@ -8,7 +8,8 @@ export type BotEvent =
   | { type: "trade.liquidated"; data: { tradeId: number; botId: number; symbol: string; realizedPnlUsd: number; createType: string } }
   | { type: "tpsl.failed"; data: { orderId: string; symbol: string; botId: number; reason: string } }
   | { type: "balance.updated"; data: { equityUsd: number; availableUsd: number } }
-  | { type: "ws.reconnected"; data: { disconnectedMs: number } };
+  | { type: "ws.reconnected"; data: { disconnectedMs: number } }
+  | { type: "storage.critical"; data: { dbSizeBytes: number; volumeSizeBytes: number; percentUsed: number } };
 
 export class EventBus extends EventEmitter {
   publish(event: BotEvent): void {
