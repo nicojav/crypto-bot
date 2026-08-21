@@ -74,6 +74,8 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
   const [to, setTo] = useState(defaultTo);
   const [validateFraction, setValidateFraction] = useState("0.15");
   const [holdoutFraction, setHoldoutFraction] = useState("0.15");
+  const [walkForwardEnabled, setWalkForwardEnabled] = useState(false);
+  const [walkForwardFolds, setWalkForwardFolds] = useState("4");
   const [minTrades, setMinTrades] = useState("30");
   const [initialCapital, setInitialCapital] = useState("10000");
   const [maxPositionUsd, setMaxPositionUsd] = useState("1000");
@@ -170,7 +172,8 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       to: new Date(`${to}T23:59:59Z`).toISOString(),
       validateFraction: Number(validateFraction) || 0.15,
       holdoutFraction: Number(holdoutFraction) || 0.15,
-      minTrades: Number(minTrades) || 10,
+      walkForwardFolds: walkForwardEnabled ? Number(walkForwardFolds) || undefined : undefined,
+      minTrades: Number(minTrades) || 30,
       initialCapital: Number(initialCapital) || 10_000,
       maxPositionUsd: Number(maxPositionUsd) || 1_000,
       leverage: Number(leverage) || 5,
@@ -264,6 +267,31 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
             ]}
           />
         </div>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="flex items-center gap-2 text-xs text-text-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={walkForwardEnabled}
+            onChange={(e) => setWalkForwardEnabled(e.target.checked)}
+            className="accent-green"
+          />
+          <Tooltip text="Instead of one continuous validate-period score, splits validate into this many sequential folds and ranks configs by their mean fold score. A config that only works in one regime within the validate window can no longer hide behind a good blended average — but it costs shortlist-size × folds extra backtests, so runs take longer.">
+            Walk-forward selection
+          </Tooltip>
+        </label>
+        {walkForwardEnabled && (
+          <input
+            type="number"
+            min="2"
+            max="12"
+            value={walkForwardFolds}
+            onChange={(e) => setWalkForwardFolds(e.target.value)}
+            className="w-16 bg-surface border border-border rounded-lg px-2 py-1 text-xs font-mono text-text-1 focus:outline-none focus:border-border-bright transition-colors"
+          />
+        )}
+        {walkForwardEnabled && <span className="text-xs text-text-3">folds</span>}
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-3 pt-1">
@@ -361,6 +389,24 @@ const Th: FC<{ label: string; help?: string; align?: "left" | "right" | "center"
   </th>
 );
 
+const SPLIT_LEGEND: { label: string; tone: string; desc: string }[] = [
+  { label: "Train", tone: "text-text-2", desc: "Earliest ~70% of the date range — the data the search actually optimizes against. Always looks best; don't trust it alone." },
+  { label: "Validate", tone: "text-text-1", desc: "Next ~15% — used to pick the winner from the shortlist. Out-of-sample relative to training, but it IS what drove the ranking, so it can still be a bit optimistic." },
+  { label: "Holdout", tone: "text-green", desc: "Final ~15% (most recent data) — never touched by training or selection in any way. This is the only genuinely trustworthy number for whether this will actually work." },
+  { label: "Fit", tone: "text-text-1", desc: "Holdout score ÷ train score, as a %. 100% means the edge fully held up on untouched data; 0% or below means it didn't transfer at all." },
+];
+
+const SplitLegend: FC = () => (
+  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 px-4 py-3 border-b border-border">
+    {SPLIT_LEGEND.map((item) => (
+      <div key={item.label} className="space-y-1">
+        <div className={`text-[11px] font-semibold uppercase tracking-wide ${item.tone}`}>{item.label}</div>
+        <p className="text-[11px] leading-relaxed text-text-3">{item.desc}</p>
+      </div>
+    ))}
+  </div>
+);
+
 const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOptimizeCellResult) => void }> = ({ results, onLoad }) => {
   const [copyingKey, setCopyingKey] = useState<string | null>(null);
 
@@ -380,10 +426,9 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
   return (
     <div className="bg-surface border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-2.5 text-xs text-text-3 border-b border-border">
-        Top {results.length} ranked by validate score. Train shows in-sample (optimized-on) performance for
-        comparison — Holdout is the number that actually validates the config, since it never influenced the
-        ranking.
+        Top {results.length} ranked by validate score.
       </div>
+      <SplitLegend />
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -449,7 +494,17 @@ const ResultsTable: FC<{ results: AutoOptimizeCellResult[]; onLoad: (r: AutoOpti
                   <td className="px-4 py-2.5 font-mono text-xs text-text-1">{r.symbol}</td>
                   <td className="px-4 py-2.5 font-mono text-xs text-text-2">{r.timeframe}</td>
                   <td className={`px-4 py-2.5 text-right font-mono text-xs ${pnlColor(r.trainStats.totalPnlPct)}`}>{signedPct(r.trainStats.totalPnlPct)}</td>
-                  <td className={`px-4 py-2.5 text-right font-mono text-xs ${pnlColor(r.validateStats.totalPnlPct)}`}>{signedPct(r.validateStats.totalPnlPct)}</td>
+                  <td className={`px-4 py-2.5 text-right font-mono text-xs ${pnlColor(r.validateStats.totalPnlPct)}`}>
+                    {signedPct(r.validateStats.totalPnlPct)}
+                    {r.walkForwardScores && (
+                      <Tooltip
+                        text={`Ranked by the mean of ${r.walkForwardScores.length} walk-forward folds, not this continuous-period number. Per-fold scores: ${r.walkForwardScores.map((s) => s.toFixed(2)).join(", ")}`}
+                        triggerClassName="ml-1 text-[9px] font-semibold text-text-3 cursor-help align-super"
+                      >
+                        WF
+                      </Tooltip>
+                    )}
+                  </td>
                   <td className={`px-4 py-2.5 text-right font-mono text-xs font-medium ${pnlColor(r.holdoutStats.totalPnlPct)}`}>{signedPct(r.holdoutStats.totalPnlPct)}</td>
                   <td className="px-4 py-2.5 text-right font-mono text-xs text-text-2">{fmtPct.format(r.holdoutStats.winRatePct)}%</td>
                   <td className="px-4 py-2.5 text-right font-mono text-xs text-red">{fmtPct.format(r.holdoutStats.maxDrawdownPct)}%</td>

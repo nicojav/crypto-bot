@@ -368,6 +368,9 @@ export type AutoOptimizeCellResult = {
   /** holdoutScore / trainScore — genuinely untouched by selection; the trustworthy number. */
   holdoutRatio: number;
   combosEvaluated: number;
+  /** One score per walk-forward fold — present only when the run requested walkForwardFolds > 1.
+   * validateScore above is their mean. */
+  walkForwardScores?: number[];
 };
 
 export type AutoOptimizeRunStatus = "running" | "done" | "error" | "cancelled";
@@ -399,6 +402,9 @@ export const startAutoOptimize = (body: {
   to: string;
   validateFraction?: number;
   holdoutFraction?: number;
+  /** Opt-in — omit for a single continuous validate-slice score; 2+ aggregates that many rolling
+   * validate folds instead, so a config can't hide behind a good blended average. */
+  walkForwardFolds?: number;
   minTrades?: number;
   scoreWeights?: Partial<ScoreWeights>;
   initialCapital?: number;
