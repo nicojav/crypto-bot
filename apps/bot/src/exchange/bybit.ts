@@ -102,21 +102,46 @@ function isNetworkError(err: unknown): boolean {
   );
 }
 
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+// Bybit's rate-limit retCode (10006, "too many visits") surfaces as a normal 200 response with a
+// non-zero retCode, not a thrown network error — bybitError() turns that into an
+// Error("Bybit error 10006: ..."), which is what this matches on. The 429/"too many requests"
+// text checks are a fallback for the rare case the SDK's HTTP layer throws before a retCode is
+// ever parsed (a hard proxy/gateway-level rate limit rather than Bybit's own API response).
+function isRateLimitError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return msg.includes("bybit error 10006") || msg.includes("429") || msg.includes("too many");
+}
+
+function isRetryable(err: unknown): boolean {
+  return isNetworkError(err) || isRateLimitError(err);
+}
+
+async function withRetry<T>(fn: () => Promise<T>, retryable: (err: unknown) => boolean = isNetworkError): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isNetworkError(err) || attempt === RETRY_DELAYS_MS.length) break;
+      if (!retryable(err) || attempt === RETRY_DELAYS_MS.length) break;
       const delay = RETRY_DELAYS_MS[attempt];
-      console.warn(`[bybit] network error, retry ${attempt + 1} in ${delay}ms:`, (err as Error).message);
+      console.warn(`[bybit] retryable error, retry ${attempt + 1} in ${delay}ms:`, (err as Error).message);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastErr;
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Gap between consecutive pagination requests in getKline/getFundingHistory — these are the only
+// methods that can fire dozens to hundreds of sequential requests for a single call (a multi-year
+// 5m backtest window), so they're the only ones that need proactive throttling on top of the
+// retryable-429 handling above.
+const PAGINATION_DELAY_MS = 150;
 
 function bybitError(err: unknown): never {
   if (err && typeof err === "object" && "retCode" in err) {
@@ -433,12 +458,21 @@ export class BybitClient {
     const intervalMs = TIMEFRAME_MS[timeframe];
     const results: Kline[] = [];
     let cursorStart = startMs;
+    let page = 0;
 
     while (cursorStart <= endMs) {
-      const res = await withRetry(() =>
-        this.marketDataClient.getKline({ category: "linear", symbol, interval, start: cursorStart, end: endMs, limit: 1000 })
-      );
-      if (res.retCode !== 0) bybitError(res);
+      // A long backtest window (e.g. 2 years of 5m data) can page through this loop 200+ times
+      // in a row — throttle proactively, and check retCode *inside* the retried call so a
+      // rate-limit response (a normal 200 with a non-zero retCode, not a thrown network error)
+      // becomes something withRetry can actually catch and back off on. See isRetryable.
+      if (page > 0) await sleep(PAGINATION_DELAY_MS);
+      page++;
+
+      const res = await withRetry(async () => {
+        const r = await this.marketDataClient.getKline({ category: "linear", symbol, interval, start: cursorStart, end: endMs, limit: 1000 });
+        if (r.retCode !== 0) bybitError(r);
+        return r;
+      }, isRetryable);
 
       // Bybit returns newest-first; normalise to ascending order.
       const batch = res.result.list
@@ -472,12 +506,18 @@ export class BybitClient {
   async getFundingHistory(symbol: string, startMs: number, endMs: number): Promise<FundingRateEntry[]> {
     const results: FundingRateEntry[] = [];
     let cursorStart = startMs;
+    let page = 0;
 
     while (cursorStart <= endMs) {
-      const res = await withRetry(() =>
-        this.marketDataClient.getFundingRateHistory({ category: "linear", symbol, startTime: cursorStart, endTime: endMs, limit: 200 })
-      );
-      if (res.retCode !== 0) bybitError(res);
+      // Same proactive throttling + in-loop retCode check as getKline — see its comment.
+      if (page > 0) await sleep(PAGINATION_DELAY_MS);
+      page++;
+
+      const res = await withRetry(async () => {
+        const r = await this.marketDataClient.getFundingRateHistory({ category: "linear", symbol, startTime: cursorStart, endTime: endMs, limit: 200 });
+        if (r.retCode !== 0) bybitError(r);
+        return r;
+      }, isRetryable);
 
       // Bybit returns newest-first; normalise to ascending order.
       const batch = res.result.list

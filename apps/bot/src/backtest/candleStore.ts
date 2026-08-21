@@ -10,14 +10,43 @@ export interface CandleSource {
 }
 
 /**
+ * Inserts klines for symbol+timeframe, skipping any (symbol, timeframe, openTime) already
+ * cached. Prisma's createMany `skipDuplicates` isn't supported on SQLite, and without it a
+ * single conflicting row fails the *whole* batch (SQLite has no partial-insert semantics here),
+ * silently dropping otherwise-new rows too — so duplicates are filtered out beforehand instead.
+ * Needed both for a plain overlapping re-fetch and for the mid-range gap repair below, where the
+ * repaired range's boundary candle can coincide with one already on disk.
+ */
+async function insertCandlesSkippingDuplicates(
+  db: PrismaClient,
+  symbol: string,
+  timeframe: TimeframeId,
+  klines: readonly Kline[],
+): Promise<void> {
+  if (klines.length === 0) return;
+  const existing = await db.candle.findMany({
+    where: { symbol, timeframe, openTime: { in: klines.map((k) => k.openTime) } },
+    select: { openTime: true },
+  });
+  const existingTimes = new Set(existing.map((r) => r.openTime));
+  const toInsert = klines.filter((k) => !existingTimes.has(k.openTime));
+  if (toInsert.length === 0) return;
+  await db.candle.createMany({
+    data: toInsert.map((k) => ({ symbol, timeframe, ...k })),
+  });
+}
+
+/**
  * Ensures the [fromMs, toMs] window is cached in the Candle table for symbol+timeframe,
  * downloading only what's missing, then returns the full requested slice.
  *
- * Coverage is tracked by the min/max cached openTime — we only detect gaps at the edges
- * of the requested window (extending an already-cached range backward/forward), not gaps
- * in the middle of an existing range (e.g. from an exchange outage). That's the common case
- * for this tool (grow the cached window over time) and keeps the cache logic simple; a
- * mid-range gap would need a manual re-fetch of that sub-range.
+ * Coverage is tracked two ways: the min/max cached openTime catches gaps at the *edges* of the
+ * requested window (extending an already-cached range backward/forward — the common case, since
+ * this tool grows the cached window over time), and a second pass scans the now-edge-filled rows
+ * for any consecutive pair further apart than one interval — a hole punched in the *middle* of an
+ * already-cached range (e.g. a Bybit outage mid-fetch on a prior call). Left undetected, a
+ * mid-range gap silently shifts every subsequent bar index for anything reading this range
+ * (indicator warm-up, trade entry bars, everything) with no error or warning anywhere.
  */
 export async function ensureCandles(
   db: PrismaClient,
@@ -34,31 +63,49 @@ export async function ensureCandles(
     db.candle.findFirst({ where: { symbol, timeframe }, orderBy: { openTime: "desc" } }),
   ]);
 
-  const gaps: Array<{ start: number; end: number }> = [];
+  const edgeGaps: Array<{ start: number; end: number }> = [];
   if (!existingMin || !existingMax) {
-    gaps.push({ start: fromMs, end: toMs });
+    edgeGaps.push({ start: fromMs, end: toMs });
   } else {
     if (fromMs < existingMin.openTime) {
-      gaps.push({ start: fromMs, end: Math.min(existingMin.openTime - intervalMs, toMs) });
+      edgeGaps.push({ start: fromMs, end: Math.min(existingMin.openTime - intervalMs, toMs) });
     }
     if (toMs > existingMax.openTime) {
-      gaps.push({ start: Math.max(existingMax.openTime + intervalMs, fromMs), end: toMs });
+      edgeGaps.push({ start: Math.max(existingMax.openTime + intervalMs, fromMs), end: toMs });
     }
   }
 
-  for (const gap of gaps) {
+  for (const gap of edgeGaps) {
     if (gap.start > gap.end) continue;
     const klines = await bybit.getKline(symbol, timeframe, gap.start, gap.end);
-    if (klines.length === 0) continue;
-    await db.candle.createMany({
-      data: klines.map((k) => ({ symbol, timeframe, ...k })),
-    });
+    await insertCandlesSkippingDuplicates(db, symbol, timeframe, klines);
   }
 
-  const rows = await db.candle.findMany({
+  let rows = await db.candle.findMany({
     where: { symbol, timeframe, openTime: { gte: fromMs, lte: toMs } },
     orderBy: { openTime: "asc" },
   });
+
+  const midGaps: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i + 1 < rows.length; i++) {
+    const delta = rows[i + 1]!.openTime - rows[i]!.openTime;
+    if (delta > intervalMs) {
+      midGaps.push({ start: rows[i]!.openTime + intervalMs, end: rows[i + 1]!.openTime - intervalMs });
+    }
+  }
+
+  if (midGaps.length > 0) {
+    for (const gap of midGaps) {
+      const klines = await bybit.getKline(symbol, timeframe, gap.start, gap.end);
+      await insertCandlesSkippingDuplicates(db, symbol, timeframe, klines);
+    }
+    // Only re-read when a repair actually happened — the common case (no mid-range gap) costs
+    // nothing beyond the single read every call already did.
+    rows = await db.candle.findMany({
+      where: { symbol, timeframe, openTime: { gte: fromMs, lte: toMs } },
+      orderBy: { openTime: "asc" },
+    });
+  }
 
   return rows.map((r) => ({
     openTime: r.openTime,

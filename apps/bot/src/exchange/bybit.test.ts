@@ -374,6 +374,50 @@ describe("getKline", () => {
     expect(mockGetKlineMarketData).toHaveBeenCalledTimes(2);
     expect(klines.length).toBeGreaterThan(1000);
   });
+
+  it("waits between pagination pages instead of firing them back-to-back", async () => {
+    vi.useFakeTimers();
+    try {
+      const intervalMs = 24 * 60 * 60 * 1000;
+      const fullPage = Array.from({ length: 1000 }, (_, i) => [
+        String(1_700_000_000_000 + i * intervalMs), "100", "101", "99", "100.5", "10", "1000",
+      ]);
+      const lastPage = [["1700086400000", "100", "101", "99", "100.5", "10", "1000"]];
+      mockGetKlineMarketData.mockResolvedValueOnce(okPage(fullPage)).mockResolvedValueOnce(okPage(lastPage));
+
+      const promise = client.getKline("BTCUSDT", "1d", 1_700_000_000_000, 1_700_000_000_000 + 1001 * intervalMs);
+
+      await vi.advanceTimersByTimeAsync(0); // let the first page's mocked promise resolve
+      expect(mockGetKlineMarketData).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(100); // short of the inter-page delay
+      expect(mockGetKlineMarketData).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(100); // now past it
+      await promise;
+      expect(mockGetKlineMarketData).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a rate-limited (retCode 10006) response instead of surfacing it immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetKlineMarketData
+        .mockResolvedValueOnce({ retCode: 10006, retMsg: "Too many visits!", result: {} })
+        .mockResolvedValueOnce(okPage([["1700000000000", "100", "101", "99", "100.5", "10", "1000"]]));
+
+      const promise = client.getKline("BTCUSDT", "1d", 1_700_000_000_000, 1_700_000_000_000);
+      await vi.advanceTimersByTimeAsync(1_000); // first retry backoff
+      const klines = await promise;
+
+      expect(mockGetKlineMarketData).toHaveBeenCalledTimes(2);
+      expect(klines).toEqual([{ openTime: 1_700_000_000_000, open: 100, high: 101, low: 99, close: 100.5, volume: 10 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("getFundingHistory", () => {
@@ -420,5 +464,48 @@ describe("getFundingHistory", () => {
     mockGetFundingRateHistoryMarketData.mockResolvedValueOnce(okPage([]));
     const rates = await client.getFundingHistory("BTCUSDT", 1_700_000_000_000, 1_700_000_000_000);
     expect(rates).toEqual([]);
+  });
+
+  it("waits between pagination pages instead of firing them back-to-back", async () => {
+    vi.useFakeTimers();
+    try {
+      const fullPage = Array.from({ length: 200 }, (_, i) => ({
+        symbol: "BTCUSDT", fundingRate: "0.0001", fundingRateTimestamp: String(1_700_000_000_000 + i * 60_000),
+      }));
+      const lastPage = [{ symbol: "BTCUSDT", fundingRate: "0.0002", fundingRateTimestamp: "1700000012000000" }];
+      mockGetFundingRateHistoryMarketData.mockResolvedValueOnce(okPage(fullPage)).mockResolvedValueOnce(okPage(lastPage));
+
+      const promise = client.getFundingHistory("BTCUSDT", 1_700_000_000_000, 1_700_000_020_000_000);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await promise;
+      expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a rate-limited (retCode 10006) response instead of surfacing it immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetFundingRateHistoryMarketData
+        .mockResolvedValueOnce({ retCode: 10006, retMsg: "Too many visits!", result: {} })
+        .mockResolvedValueOnce(okPage([{ symbol: "BTCUSDT", fundingRate: "0.0001", fundingRateTimestamp: "1700000000000" }]));
+
+      const promise = client.getFundingHistory("BTCUSDT", 1_700_000_000_000, 1_700_000_000_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const rates = await promise;
+
+      expect(mockGetFundingRateHistoryMarketData).toHaveBeenCalledTimes(2);
+      expect(rates).toEqual([{ fundingTime: 1_700_000_000_000, fundingRate: 0.0001 }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

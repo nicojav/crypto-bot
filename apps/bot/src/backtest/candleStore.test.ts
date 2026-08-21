@@ -96,4 +96,37 @@ describe("ensureCandles", () => {
 
     expect(source.getKline).toHaveBeenCalledTimes(3);
   });
+
+  it("detects and repairs a hole punched in the middle of an already-cached range (regression: edge-only gap detection couldn't see this at all)", async () => {
+    const source = makeMockSource();
+    source.getKline.mockResolvedValueOnce([kline(0), kline(DAY_MS), kline(2 * DAY_MS)]);
+    await ensureCandles(testDb, source, "BTCUSDT", "1d", 0, 2 * DAY_MS);
+
+    // Simulate an exchange outage having left a hole: delete the middle candle directly,
+    // bypassing ensureCandles (which would never create this state on its own).
+    await testDb.candle.deleteMany({ where: { symbol: "BTCUSDT", timeframe: "1d", openTime: DAY_MS } });
+
+    source.getKline.mockClear();
+    source.getKline.mockResolvedValueOnce([kline(DAY_MS)]);
+    const result = await ensureCandles(testDb, source, "BTCUSDT", "1d", 0, 2 * DAY_MS);
+
+    // min/max are still 0 and 2*DAY_MS, so this can only have come from the mid-range scan.
+    expect(source.getKline).toHaveBeenCalledTimes(1);
+    expect(source.getKline).toHaveBeenCalledWith("BTCUSDT", "1d", DAY_MS, DAY_MS);
+    expect(result.map((c) => c.openTime)).toEqual([0, DAY_MS, 2 * DAY_MS]);
+  });
+
+  it("skips a duplicate instead of failing the whole insert when the exchange re-returns an already-cached candle", async () => {
+    const source = makeMockSource();
+    source.getKline.mockResolvedValueOnce([kline(0), kline(DAY_MS)]);
+    await ensureCandles(testDb, source, "BTCUSDT", "1d", 0, DAY_MS);
+
+    // The new edge fetch legitimately returns 2*DAY_MS, but also re-includes the already-cached
+    // DAY_MS boundary candle — without duplicate-safe inserts this throws on the unique
+    // constraint and silently drops 2*DAY_MS along with it (SQLite fails the whole batch).
+    source.getKline.mockResolvedValueOnce([kline(DAY_MS), kline(2 * DAY_MS)]);
+    const result = await ensureCandles(testDb, source, "BTCUSDT", "1d", 0, 2 * DAY_MS);
+
+    expect(result.map((c) => c.openTime)).toEqual([0, DAY_MS, 2 * DAY_MS]);
+  });
 });
