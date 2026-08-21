@@ -16,6 +16,12 @@ export interface CandleSource {
  * silently dropping otherwise-new rows too — so duplicates are filtered out beforehand instead.
  * Needed both for a plain overlapping re-fetch and for the mid-range gap repair below, where the
  * repaired range's boundary candle can coincide with one already on disk.
+ *
+ * `klines` is always the contiguous, ascending-sorted result of one `getKline` call for a single
+ * gap — so the existing-row lookup filters by an openTime *range* (min..max), not an `IN (...)`
+ * list of every individual timestamp. A large single-fetch gap (a multi-year 5m backtest window
+ * can return thousands of candles) would otherwise exceed SQLite's bound-parameter limit on the
+ * `IN` list and throw "the query parameter limit supported by your database is exceeded".
  */
 async function insertCandlesSkippingDuplicates(
   db: PrismaClient,
@@ -24,8 +30,13 @@ async function insertCandlesSkippingDuplicates(
   klines: readonly Kline[],
 ): Promise<void> {
   if (klines.length === 0) return;
+  // klines is ascending-sorted (getKline's contract) — first/last bound the range directly,
+  // rather than Math.min/max(...openTimes), which risks a "Maximum call stack size exceeded"
+  // spreading a very large array of arguments.
+  const rangeStart = klines[0]!.openTime;
+  const rangeEnd = klines[klines.length - 1]!.openTime;
   const existing = await db.candle.findMany({
-    where: { symbol, timeframe, openTime: { in: klines.map((k) => k.openTime) } },
+    where: { symbol, timeframe, openTime: { gte: rangeStart, lte: rangeEnd } },
     select: { openTime: true },
   });
   const existingTimes = new Set(existing.map((r) => r.openTime));

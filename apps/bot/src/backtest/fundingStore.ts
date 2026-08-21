@@ -50,8 +50,15 @@ export async function ensureFundingRates(
     // here), which would silently drop otherwise-new rows too. Filter out anything already
     // cached before inserting instead, so an overlapping fetch (the source returning a
     // settlement at/near the requested boundary again) can't lose data either way.
+    //
+    // entries is ascending-sorted (getFundingHistory's contract) and can span thousands of rows
+    // for a multi-year window (getFundingHistory paginates internally but returns one combined
+    // array) — filtering by an openTime *range* here instead of an `IN (...)` list of every
+    // individual timestamp avoids exceeding SQLite's bound-parameter limit on a large gap.
+    const rangeStart = entries[0]!.fundingTime;
+    const rangeEnd = entries[entries.length - 1]!.fundingTime;
     const existing = await db.fundingRate.findMany({
-      where: { symbol, fundingTime: { in: entries.map((e) => e.fundingTime) } },
+      where: { symbol, fundingTime: { gte: rangeStart, lte: rangeEnd } },
       select: { fundingTime: true },
     });
     const existingTimes = new Set(existing.map((r) => r.fundingTime));
