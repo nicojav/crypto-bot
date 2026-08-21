@@ -23,6 +23,10 @@ export interface AutoOptimizeConfig {
   to: string;
   validateFraction: number;
   holdoutFraction: number;
+  /** Opt-in — omit (or leave at 1) for the default single continuous validate-slice selection.
+   * When > 1, selection uses the mean of this many rolling validate folds instead — see
+   * search.ts's WalkForwardOptions. */
+  walkForwardFolds?: number;
   minTrades: number;
   scoreWeights: ScoreWeights;
   engine: Omit<EngineConfig, "lotSize" | "tickSize">;
@@ -152,6 +156,7 @@ export async function runAutoOptimization(
         // previously both existed independently and only the scoreWeights one actually did
         // anything, so a caller setting just config.minTrades had it silently ignored.
         scoreWeights: { ...config.scoreWeights, minTrades: config.minTrades },
+        walkForward: config.walkForwardFolds && config.walkForwardFolds > 1 ? { folds: config.walkForwardFolds } : undefined,
         yieldEvery: 25,
         onBacktest: () => { backtestsRun++; },
         isCancelled,

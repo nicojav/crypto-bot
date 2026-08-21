@@ -13,6 +13,21 @@ function roundTo(value: number, precision = 8): number {
   return Math.round(value * factor) / factor;
 }
 
+/**
+ * `scoreWeights.minTrades` is meant to express "how many trades before a score is stable
+ * enough to trust" — but train, validate, holdout, and (per-fold) walk-forward windows are
+ * very different sizes (train is ~70% of the data by default, holdout and validate ~15% each,
+ * and one walk-forward fold is a further slice of validate). Applying the same absolute
+ * threshold to all of them implicitly demands proportionally higher trade *frequency* out of
+ * the smaller windows just to clear the same bar — in practice this meant holdout (and every
+ * walk-forward fold) almost always failed it and scored a flat 0 regardless of actual
+ * performance, making the reported holdout/fit numbers meaningless rather than conservative.
+ * Scale the threshold down by how much smaller this window is than train's. */
+function scaledMinTrades(baseMinTrades: number, windowFraction: number, trainFraction: number): number {
+  if (trainFraction <= 0) return baseMinTrades;
+  return Math.max(1, Math.round(baseMinTrades * (windowFraction / trainFraction)));
+}
+
 export interface GridBudget {
   /** Hard cap on how many param combinations the coarse grid can produce for one strategy. */
   maxCombosPerCell: number;
@@ -31,6 +46,18 @@ export interface RefineOptions {
 }
 
 export const DEFAULT_REFINE_OPTIONS: RefineOptions = { window: 3, valuesPerParam: 5, maxCombosPerNeighborhood: 200 };
+
+export interface WalkForwardOptions {
+  /** Number of sequential, non-overlapping folds to split the validate window into. Each
+   * shortlisted config is scored against every fold independently, and the *mean* fold score —
+   * not one blended score over the whole validate period — becomes what selection ranks on. A
+   * config that only works in one regime within the validate window (e.g. the first half trends,
+   * the second chops) can no longer hide behind a good combined average; it has to hold up
+   * across folds individually. Opt-in because it costs `shortlistSize * folds` extra backtests
+   * on top of the normal validate pass — the worker pool (see workerPool.ts) is what makes that
+   * affordable during a live search. */
+  folds: number;
+}
 
 function isEnumParam(p: StrategyParamDef): boolean {
   return p.options != null;
@@ -166,6 +193,10 @@ export interface SearchOptions {
   shortlistSize: number;
   /** How many validate-ranked finalists to return (each also evaluated on holdout for reporting). */
   keepTop: number;
+  /** When set (folds > 1), selection uses walk-forward validation instead of one continuous
+   * validate-period score — see WalkForwardOptions. Left unset by default: it's meaningfully
+   * more expensive, and a single fixed split is still a reasonable default for a quick search. */
+  walkForward?: WalkForwardOptions;
   /** Minimum sample size for a config to score above 0 lives on `scoreWeights.minTrades` (read
    * inside `scoreResult`) — there is deliberately no separate `minTrades` here. A prior version
    * of this type had both, and only `scoreWeights.minTrades` was ever actually consulted, so a
@@ -226,6 +257,10 @@ export interface SearchResult {
    * combos should be trusted less than one out of 20). Same value across every finalist from one
    * cell. */
   combosEvaluated: number;
+  /** One score per walk-forward fold, present only when `SearchOptions.walkForward` was set.
+   * `validateScore` above is their mean — this is what it's a mean *of*, so the UI can show how
+   * consistent (or not) the edge was across folds rather than just the blended number. */
+  walkForwardScores?: number[];
 }
 
 async function evaluate(
@@ -303,6 +338,20 @@ function outcomeKey(stats: BacktestStats): string {
   return [round(stats.totalPnlPct), stats.totalTrades, round(stats.winRatePct), round(stats.maxDrawdownPct), pf].join("|");
 }
 
+/** Splits `items` into `folds` sequential, non-overlapping, chronologically-ordered chunks —
+ * clamped to at most one item's worth of folds so a fold is never empty. */
+function splitIntoFolds<T>(items: readonly T[], folds: number): T[][] {
+  const n = Math.max(1, Math.min(Math.floor(folds), items.length));
+  const size = Math.floor(items.length / n);
+  const out: T[][] = [];
+  for (let i = 0; i < n; i++) {
+    const start = i * size;
+    const end = i === n - 1 ? items.length : start + size;
+    out.push(items.slice(start, end));
+  }
+  return out;
+}
+
 /**
  * Coarse-grid search over one (strategy, symbol, timeframe) cell, refined around the best
  * regions, then selected on a validate split and reported on a holdout split the search never
@@ -326,6 +375,16 @@ export async function searchCell(
   const validateCandles = candles.slice(trainEnd, validateEnd);
   const holdoutCandles = candles.slice(validateEnd);
   if (trainCandles.length === 0 || validateCandles.length === 0 || holdoutCandles.length === 0) return [];
+
+  const trainFraction = 1 - opts.validateFraction - opts.holdoutFraction;
+  const validateWeights: ScoreWeights = {
+    ...opts.scoreWeights,
+    minTrades: scaledMinTrades(opts.scoreWeights.minTrades, opts.validateFraction, trainFraction),
+  };
+  const holdoutWeights: ScoreWeights = {
+    ...opts.scoreWeights,
+    minTrades: scaledMinTrades(opts.scoreWeights.minTrades, opts.holdoutFraction, trainFraction),
+  };
 
   let evaluatedSinceYield = 0;
   async function maybeYield() {
@@ -375,13 +434,37 @@ export async function searchCell(
   const shortlist = [...bestByOutcome.values()].sort((a, b) => b.score - a.score).slice(0, opts.shortlistSize);
 
   // ── Select on validate: this is the pass that actually decides the final ranking ───────────
+  // validateStats/validateResults always come from one continuous backtest over the whole
+  // validate window, regardless of walk-forward — that's what's shown as the headline
+  // "Validate" numbers. What *ranks* the shortlist differs: with walk-forward, it's the mean of
+  // several rolling fold scores instead of this single continuous-period score (see below).
   const shortlistParams = shortlist.map((s) => s.params);
-  const validateResults = await evaluateBatch(strategy, validateCandles, shortlistParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
+  const validateResults = await evaluateBatch(strategy, validateCandles, shortlistParams, engineConfig, timeframe, validateWeights, opts, maybeYield);
+
+  let rankingScores: number[] = validateResults.map((v) => v.score);
+  let walkForwardScoresByIndex: number[][] | undefined;
+  if (opts.walkForward && opts.walkForward.folds > 1) {
+    const foldFraction = opts.validateFraction / opts.walkForward.folds;
+    const foldWeights: ScoreWeights = { ...opts.scoreWeights, minTrades: scaledMinTrades(opts.scoreWeights.minTrades, foldFraction, trainFraction) };
+    const foldCandleSets = splitIntoFolds(validateCandles, opts.walkForward.folds);
+    const perFoldResults = await Promise.all(
+      foldCandleSets.map((foldCandles) => evaluateBatch(strategy, foldCandles, shortlistParams, engineConfig, timeframe, foldWeights, opts, maybeYield)),
+    );
+    walkForwardScoresByIndex = shortlist.map((_, i) => perFoldResults.map((foldResults) => foldResults[i]!.score));
+    rankingScores = walkForwardScoresByIndex.map((scores) => scores.reduce((sum, s) => sum + s, 0) / scores.length);
+  }
 
   const ranked = shortlist
     .map((s, i) => {
       const validate = validateResults[i]!;
-      return { params: s.params, trainScore: s.score, trainStats: s.stats, validateScore: validate.score, validateStats: validate.stats };
+      return {
+        params: s.params,
+        trainScore: s.score,
+        trainStats: s.stats,
+        validateScore: rankingScores[i]!,
+        validateStats: validate.stats,
+        walkForwardScores: walkForwardScoresByIndex?.[i],
+      };
     })
     .sort((a, b) => b.validateScore - a.validateScore)
     .slice(0, opts.keepTop);
@@ -389,7 +472,7 @@ export async function searchCell(
   // ── Report on holdout — evaluated only for the already-chosen finalists, purely for the
   // record; it never feeds back into ranking or which configs made the cut. ────────────────────
   const holdoutParams = ranked.map((r) => r.params);
-  const holdoutResults = await evaluateBatch(strategy, holdoutCandles, holdoutParams, engineConfig, timeframe, opts.scoreWeights, opts, maybeYield);
+  const holdoutResults = await evaluateBatch(strategy, holdoutCandles, holdoutParams, engineConfig, timeframe, holdoutWeights, opts, maybeYield);
 
   // Already in validateScore-descending order via `ranked` — holdout must never re-sort this.
   return ranked.map((r, i) => {
@@ -402,6 +485,7 @@ export async function searchCell(
       trainScore: r.trainScore,
       validateScore: r.validateScore,
       holdoutScore: holdout.score,
+      walkForwardScores: r.walkForwardScores,
       validateRatio: r.validateScore / r.trainScore,
       holdoutRatio: holdout.score / r.trainScore,
       combosEvaluated,

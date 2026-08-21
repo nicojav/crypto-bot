@@ -239,6 +239,114 @@ describe("searchCell overfit detection", () => {
   });
 });
 
+describe("searchCell walk-forward", () => {
+  function walkForwardBaseOpts(): SearchOptions {
+    return {
+      ...DEFAULT_SEARCH_OPTIONS,
+      validateFraction: 0.3,
+      holdoutFraction: 0.2,
+      scoreWeights: { ...DEFAULT_SEARCH_OPTIONS.scoreWeights, minTrades: 1 },
+    };
+  }
+
+  it("leaves walkForwardScores undefined when walk-forward isn't requested", async () => {
+    const candles = trendCandles(80, 100, 160);
+    const results = await searchCell(makeSideStrategy(), candles, "1d", ENGINE, walkForwardBaseOpts());
+
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) expect(r.walkForwardScores).toBeUndefined();
+  });
+
+  it("scores validate via walk-forward folds when requested, with validateScore as the mean of the per-fold scores", async () => {
+    const candles = trendCandles(80, 100, 160);
+    const opts: SearchOptions = { ...walkForwardBaseOpts(), walkForward: { folds: 4 } };
+
+    const results = await searchCell(makeSideStrategy(), candles, "1d", ENGINE, opts);
+
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      expect(r.walkForwardScores).toHaveLength(4);
+      const mean = r.walkForwardScores!.reduce((a, b) => a + b, 0) / 4;
+      expect(r.validateScore).toBeCloseTo(mean, 8);
+    }
+  });
+
+  it("runs extra backtests for each walk-forward fold beyond the single-slice validate pass", async () => {
+    const candles = trendCandles(80, 100, 160);
+
+    let withoutCount = 0;
+    await searchCell(makeSideStrategy(), candles, "1d", ENGINE, {
+      ...walkForwardBaseOpts(),
+      onBacktest: () => { withoutCount++; },
+    });
+
+    let withCount = 0;
+    await searchCell(makeSideStrategy(), candles, "1d", ENGINE, {
+      ...walkForwardBaseOpts(),
+      walkForward: { folds: 4 },
+      onBacktest: () => { withCount++; },
+    });
+
+    expect(withCount).toBeGreaterThan(withoutCount);
+  });
+
+  it("clamps walk-forward folds to the available validate candles instead of producing empty folds", async () => {
+    const candles = trendCandles(30, 100, 120);
+    const opts: SearchOptions = { ...walkForwardBaseOpts(), validateFraction: 0.2, walkForward: { folds: 50 } };
+
+    const results = await searchCell(makeSideStrategy(), candles, "1d", ENGINE, opts);
+
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) expect(r.walkForwardScores!.length).toBeGreaterThan(0);
+  });
+});
+
+// Opens a new position every `period` bars, alternating long/short, regardless of price path —
+// gives a predictable, price-path-independent trade *frequency* (unlike a real indicator
+// crossover strategy) so a test can reason about exactly how many trades land in each split.
+function makeFlippingStrategy(period: number): StrategyDefinition {
+  return {
+    id: "flipping",
+    label: "Flipping",
+    description: "",
+    params: [],
+    run: (candles) => {
+      const signals: { barIndex: number; time: number; action: "long" | "short" }[] = [];
+      for (let i = 0, flip = 0; i < candles.length; i += period, flip++) {
+        signals.push({ barIndex: i, time: candles[i]!.openTime, action: flip % 2 === 0 ? "long" : "short" });
+      }
+      return signals;
+    },
+  };
+}
+
+describe("searchCell minTrades scaling across windows", () => {
+  it("doesn't force validate/holdout/fold scores to 0 just because their window is smaller than train's (regression: a flat minTrades — sized for the ~70% train window — used to zero out every smaller window's score even when it had plenty of trades for its own size)", async () => {
+    // period=5 over 2000 bars: ~280 trades in train (70%), ~60 in each of validate/holdout
+    // (15%) — comfortably above the *scaled* bar (~6 for a 15% window against minTrades=30) but
+    // nowhere near the unscaled 30 the old flat threshold would have demanded of a 15% window.
+    const candles = oscillatingCandles(2000);
+    const strategy = makeFlippingStrategy(5);
+
+    // DEFAULT_SEARCH_OPTIONS.scoreWeights.minTrades is 30 — deliberately left un-relaxed here,
+    // since the whole point is to prove holdout/validate/folds don't need train's own trade
+    // count to pass their own (proportionally scaled) bar.
+    const opts: SearchOptions = {
+      ...DEFAULT_SEARCH_OPTIONS,
+      validateFraction: 0.15,
+      holdoutFraction: 0.15,
+      walkForward: { folds: 3 },
+    };
+
+    const results = await searchCell(strategy, candles, "1d", ENGINE, opts);
+
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.some((r) => r.holdoutStats.totalTrades > 0 && r.holdoutScore !== 0)).toBe(true);
+    expect(results.some((r) => r.validateStats.totalTrades > 0 && r.validateScore !== 0)).toBe(true);
+    expect(results.some((r) => r.walkForwardScores!.some((s) => s !== 0))).toBe(true);
+  });
+});
+
 // oscillating uptrend, not a straight line — a monotonic ramp never produces an EMA crossover.
 function oscillatingCandles(n: number): Candle[] {
   const candles: Candle[] = [];

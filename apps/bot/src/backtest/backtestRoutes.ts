@@ -258,6 +258,7 @@ const cellResultSchema = {
     validateRatio: { type: "number" },
     holdoutRatio: { type: "number" },
     combosEvaluated: { type: "integer" },
+    walkForwardScores: { type: "array", items: { type: "number" } },
   },
   required: [
     "strategyId", "symbol", "timeframe", "params",
@@ -340,6 +341,9 @@ interface AutoOptimizeBody {
   to: string;
   validateFraction?: number;
   holdoutFraction?: number;
+  /** Opt-in — omit (or 1) for a single continuous validate-slice score; > 1 aggregates that many
+   * rolling validate folds instead. See search.ts's WalkForwardOptions. */
+  walkForwardFolds?: number;
   minTrades?: number;
   scoreWeights?: Partial<ScoreWeights>;
   initialCapital?: number;
@@ -711,6 +715,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           to:                { type: "string" },
           validateFraction:  { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.15 },
           holdoutFraction:   { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.15 },
+          walkForwardFolds:  { type: "integer", minimum: 2, maximum: 12 },
           minTrades:         { type: "integer", minimum: 0, default: 30 },
           scoreWeights:      scoreWeightsSchema,
           initialCapital:    { type: "number", exclusiveMinimum: 0, default: 10_000 },
@@ -771,6 +776,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       to: req.body.to,
       validateFraction,
       holdoutFraction,
+      walkForwardFolds: req.body.walkForwardFolds,
       minTrades: req.body.minTrades ?? 30,
       scoreWeights: { ...DEFAULT_SCORE_WEIGHTS, ...req.body.scoreWeights },
       engine: {

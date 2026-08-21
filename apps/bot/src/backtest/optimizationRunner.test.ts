@@ -97,6 +97,24 @@ describe("runAutoOptimization", () => {
     expect(isOptimizationRunning()).toBe(false);
   });
 
+  it("persists walkForwardScores on results when walkForwardFolds is set, and omits them otherwise", async () => {
+    const exchange = makeFakeExchange(makeCandles(CANDLE_COUNT));
+
+    const withoutRun = await testDb.optimizationRun.create({ data: { status: "running", configJson: "{}", cellsTotal: 1 } });
+    await runAutoOptimization(testDb, exchange, withoutRun.id, baseConfig());
+    const withoutUpdated = await testDb.optimizationRun.findUnique({ where: { id: withoutRun.id } });
+    const withoutResults = JSON.parse(withoutUpdated!.resultsJson);
+    expect(withoutResults.length).toBeGreaterThan(0);
+    for (const r of withoutResults) expect(r.walkForwardScores).toBeUndefined();
+
+    const withRun = await testDb.optimizationRun.create({ data: { status: "running", configJson: "{}", cellsTotal: 1 } });
+    await runAutoOptimization(testDb, exchange, withRun.id, baseConfig({ walkForwardFolds: 3 }));
+    const withUpdated = await testDb.optimizationRun.findUnique({ where: { id: withRun.id } });
+    const withResults = JSON.parse(withUpdated!.resultsJson);
+    expect(withResults.length).toBeGreaterThan(0);
+    for (const r of withResults) expect(r.walkForwardScores).toHaveLength(3);
+  });
+
   it("fetches funding rates for each cell's symbol and forwards them into the engine", async () => {
     const fundingCalls: Array<[string, number, number]> = [];
     const exchange: CandleSource & InstrumentSource & FundingSource = {
