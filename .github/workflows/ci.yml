@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Dummy values only — not secrets. apps/bot/src/env.ts zod-validates process.env at import time
+# and calls process.exit(1) on failure, which would otherwise kill the vitest worker before any
+# test runs. WEBHOOK_SECRET/API_TOKEN must be >=16 chars to satisfy the schema. Tests never make
+# real Bybit calls (bybit-api is mocked) and build their own temp SQLite DB from the committed
+# migration SQL, so no external services or secrets are needed to go green.
+env:
+  BYBIT_API_KEY: ci
+  BYBIT_API_SECRET: ci
+  BYBIT_TESTNET: "true"
+  WEBHOOK_SECRET: ci_test_secret_0123456789
+  API_TOKEN: ci_test_token_0123456789
+  DATABASE_URL: "file:./ci.db"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # No --ignore-scripts: apps/bot's postinstall runs `prisma generate`, and every DB test
+      # imports the generated client, which isn't checked in.
+      - run: npm ci
+
+      # No dedicated typecheck script exists — `build` (tsc for the bot, tsc && vite build for
+      # the dashboard) is what catches type errors.
+      - name: Build (typecheck)
+        run: npm run build
+
+      - name: Test — apps/bot
+        run: npm test -w apps/bot
+
+      - name: Test — apps/dashboard
+        run: npm test -w apps/dashboard
+
+      # Advisory for now: npm run lint has pre-existing failures unrelated to most PRs (tracked
+      # for a follow-up cleanup). Runs so lint regressions are visible on every PR without
+      # blocking merges until that debt is paid down.
+      - name: Lint (advisory)
+        run: npm run lint
+        continue-on-error: true

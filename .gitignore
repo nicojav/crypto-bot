@@ -17,8 +17,11 @@ build/
 *.db-shm
 *.db-wal
 
-# Prisma generated
-prisma/migrations/
+# Prisma generated client (see apps/bot/.gitignore for the actual path) — migrations themselves
+# are committed source, not generated output, so this rule must not shadow them. CI tests read
+# migration SQL straight off disk to build a temp DB, so a silently-untracked new migration would
+# pass locally and fail in CI.
+!prisma/migrations/
 
 # Logs
 *.log

@@ -205,7 +205,9 @@ export class Reconciler {
       console.error("[reconciler] WS exception:", data);
     });
 
-    ws.subscribeV5(["position", "order", "execution", "wallet"], "linear");
+    Promise.all(ws.subscribeV5(["position", "order", "execution", "wallet"], "linear")).catch(
+      (err: unknown) => console.error("[reconciler] WS subscribe error:", err)
+    );
     this.ws = ws;
     console.log("[reconciler] subscribed to position/order/execution/wallet");
   }

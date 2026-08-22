@@ -90,6 +90,20 @@ The bot starts on **http://localhost:3000** and the dashboard on **http://localh
 | `npm run reset-trade-data --workspace apps/bot` | Dry-run: show how many trades/signals would be wiped |
 | `npm run reset-trade-data --workspace apps/bot -- --confirm` | Wipe all trades and signals on the deployed bot (preserves bots and balance history) |
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every PR into `main`:
+
+| Step | Blocking? |
+|------|-----------|
+| `npm run build` (typecheck for both apps) | Yes |
+| `npm test -w apps/bot` / `npm test -w apps/dashboard` | Yes |
+| `npm run lint` | No — advisory until pre-existing lint debt is cleaned up |
+
+Tests use dummy `BYBIT_*`/`WEBHOOK_SECRET`/`API_TOKEN` values set in the workflow (not secrets —
+Bybit calls are mocked) and build their own temp SQLite DB per test run, so no external services
+need to be configured to go green.
+
 ## Bot modes
 
 Each bot row in the database has a `dryRun` flag that controls how signals are executed:
