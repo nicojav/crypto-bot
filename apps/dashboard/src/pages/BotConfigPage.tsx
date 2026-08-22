@@ -7,7 +7,9 @@ import { Field } from "../components/ui/Field";
 import { Switch } from "../components/ui/Switch";
 import { friendlyReason } from "../utils/rejectionSummary";
 
-const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
+// The bot's own public URL, for the webhook TradingView alerts POST to — see BotCard.tsx's
+// identical constant for why this is intentionally a separate env var from api/client.ts's BASE.
+const API_URL = (import.meta.env.VITE_WEBHOOK_BASE_URL as string | undefined) ?? "http://localhost:3000";
 
 const fmtTime = new Intl.DateTimeFormat("en-US", {
   month: "short", day: "numeric",

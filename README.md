@@ -27,14 +27,25 @@ graph LR
         direction TB
         WH[Webhook + REST API] --> CORE[Signal Processor + Reconciler]
         CORE --> TDB[(SQLite / Prisma)]
-        CORE --> BUS[EventBus] --> WSS[WS server]
+        CORE --> BUS[EventBus] --> WSS["WS server<br/>(Bearer-token auth)"]
+        BT[Backtest Engine] --> TDB
     end
 
-    CORE <-->|REST + private WS| BYBIT[Bybit Exchange]
+    CORE <-->|"REST + private WS (account, testnet-aware)"| BYBIT[Bybit Exchange]
+    BT -->|"REST kline history (mainnet, public — independent of testnet mode)"| BYBIT
 
-    DASH["apps/dashboard — React"] -->|REST /api/*| WH
-    WSS -->|live trade/signal events| DASH
+    subgraph DASH["apps/dashboard"]
+        direction TB
+        BROWSER["React app<br/>(same-origin, never sees<br/>the bot's API token)"] -->|"password login →<br/>session cookie"| DASHSRV["server/createServer.js<br/>(static host + REST/WS proxy,<br/>injects API_TOKEN server-side)"]
+    end
+
+    DASHSRV -->|"REST /api/* (Bearer token)"| WH
+    WSS -->|"live trade/signal events<br/>(proxied, Bearer token)"| DASHSRV
+    DASHSRV -->|events| BROWSER
 ```
+
+> In local dev, the React app talks directly to the bot with a dev token (no proxy) for
+> convenience — see `apps/dashboard/README.md`. The diagram above is the production path.
 
 > **Keeping this in sync:** whenever a feature or bug fix changes how these pieces connect,
 > update this diagram (and the per-app ones) as part of that change — see `CLAUDE.md`.
@@ -53,6 +64,7 @@ npm install
 # 2. Copy and fill in env files
 cp apps/bot/.env.example apps/bot/.env
 cp apps/dashboard/.env.example apps/dashboard/.env
+cp apps/dashboard/.env.development.example apps/dashboard/.env.development
 
 # 3. Start both apps in dev mode
 npm run dev
@@ -77,6 +89,20 @@ The bot starts on **http://localhost:3000** and the dashboard on **http://localh
 | `npm run check-bybit --workspace apps/bot` | Verify Bybit API connectivity, balance, and positions |
 | `npm run reset-trade-data --workspace apps/bot` | Dry-run: show how many trades/signals would be wiped |
 | `npm run reset-trade-data --workspace apps/bot -- --confirm` | Wipe all trades and signals on the deployed bot (preserves bots and balance history) |
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every PR into `main`:
+
+| Step | Blocking? |
+|------|-----------|
+| `npm run build` (typecheck for both apps) | Yes |
+| `npm test -w apps/bot` / `npm test -w apps/dashboard` | Yes |
+| `npm run lint` | No — advisory until pre-existing lint debt is cleaned up |
+
+Tests use dummy `BYBIT_*`/`WEBHOOK_SECRET`/`API_TOKEN` values set in the workflow (not secrets —
+Bybit calls are mocked) and build their own temp SQLite DB per test run, so no external services
+need to be configured to go green.
 
 ## Bot modes
 

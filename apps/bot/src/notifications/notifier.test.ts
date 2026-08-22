@@ -148,6 +148,24 @@ describe("Notifier", () => {
     notifier.stop();
   });
 
+  it("sends storage.critical message with GB usage and percent", async () => {
+    const notifier = new Notifier(bus, makeDb() as never);
+    notifier.start();
+
+    bus.publish({
+      type: "storage.critical",
+      data: { dbSizeBytes: 912_680_550, volumeSizeBytes: 1_073_741_824, percentUsed: 85.0 },
+    });
+    await vi.waitUntil(() => fetchMock.mock.calls.length > 0);
+
+    const text = sentText(fetchMock);
+    expect(text).toContain("Database storage critical");
+    expect(text).toContain("0.85 GB");
+    expect(text).toContain("1.00 GB");
+    expect(text).toContain("85.0%");
+    notifier.stop();
+  });
+
   it("does not call fetch when TELEGRAM_BOT_TOKEN is blank", async () => {
     vi.doMock("../env.js", () => ({
       env: { TELEGRAM_BOT_TOKEN: "", TELEGRAM_CHAT_ID: "", DAILY_SUMMARY_HOUR_UTC: 8 },

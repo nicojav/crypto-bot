@@ -1,5 +1,25 @@
-import { RestClientV5 } from "bybit-api";
+import { RestClientV5, type KlineIntervalV3 } from "bybit-api";
+
 import { env } from "../env.js";
+
+// Timeframes supported by the backtesting tool, mapped to Bybit's kline interval codes.
+export type TimeframeId = "5m" | "15m" | "4h" | "1d" | "1w";
+
+const BYBIT_INTERVAL: Record<TimeframeId, KlineIntervalV3> = {
+  "5m": "5",
+  "15m": "15",
+  "4h": "240",
+  "1d": "D",
+  "1w": "W",
+};
+
+export const TIMEFRAME_MS: Record<TimeframeId, number> = {
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+  "1w": 7 * 24 * 60 * 60_000,
+};
 
 export interface Balance {
   equity: number;
@@ -36,6 +56,20 @@ export interface ExecutionFill {
   closedSize: number;
 }
 
+export interface Kline {
+  openTime: number; // ms epoch
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface FundingRateEntry {
+  fundingTime: number; // ms epoch
+  fundingRate: number; // e.g. 0.0001 = 0.01%; positive = longs pay shorts
+}
+
 export interface ClosedPnLEntry {
   orderId: string;
   symbol: string;
@@ -68,21 +102,46 @@ function isNetworkError(err: unknown): boolean {
   );
 }
 
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+// Bybit's rate-limit retCode (10006, "too many visits") surfaces as a normal 200 response with a
+// non-zero retCode, not a thrown network error — bybitError() turns that into an
+// Error("Bybit error 10006: ..."), which is what this matches on. The 429/"too many requests"
+// text checks are a fallback for the rare case the SDK's HTTP layer throws before a retCode is
+// ever parsed (a hard proxy/gateway-level rate limit rather than Bybit's own API response).
+function isRateLimitError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return msg.includes("bybit error 10006") || msg.includes("429") || msg.includes("too many");
+}
+
+function isRetryable(err: unknown): boolean {
+  return isNetworkError(err) || isRateLimitError(err);
+}
+
+async function withRetry<T>(fn: () => Promise<T>, retryable: (err: unknown) => boolean = isNetworkError): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isNetworkError(err) || attempt === RETRY_DELAYS_MS.length) break;
+      if (!retryable(err) || attempt === RETRY_DELAYS_MS.length) break;
       const delay = RETRY_DELAYS_MS[attempt];
-      console.warn(`[bybit] network error, retry ${attempt + 1} in ${delay}ms:`, (err as Error).message);
+      console.warn(`[bybit] retryable error, retry ${attempt + 1} in ${delay}ms:`, (err as Error).message);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastErr;
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Gap between consecutive pagination requests in getKline/getFundingHistory — these are the only
+// methods that can fire dozens to hundreds of sequential requests for a single call (a multi-year
+// 5m backtest window), so they're the only ones that need proactive throttling on top of the
+// retryable-429 handling above.
+const PAGINATION_DELAY_MS = 150;
 
 function bybitError(err: unknown): never {
   if (err && typeof err === "object" && "retCode" in err) {
@@ -94,6 +153,12 @@ function bybitError(err: unknown): never {
 
 export class BybitClient {
   private client: RestClientV5;
+  // Historical klines must reflect real prices regardless of which environment the account
+  // trades in — Bybit's testnet market data is synthetic and not representative (observed
+  // >100% average daily moves). getKline() is the only method that uses this client; every
+  // other (account-scoped) method stays on `client` above. No API keys needed — the v5
+  // market-data kline endpoint is public/unauthenticated.
+  private marketDataClient: RestClientV5;
 
   constructor() {
     this.client = new RestClientV5({
@@ -101,6 +166,7 @@ export class BybitClient {
       secret: env.BYBIT_API_SECRET,
       testnet: env.BYBIT_TESTNET,
     });
+    this.marketDataClient = new RestClientV5({ testnet: false });
   }
 
   async checkClockDrift(): Promise<void> {
@@ -378,6 +444,96 @@ export class BybitClient {
       cursor = res.result.nextPageCursor ?? undefined;
       if (params.limit) break;
     } while (cursor);
+    return results;
+  }
+
+  /**
+   * Fetch OHLCV klines for [startMs, endMs], paginating forward 1000 bars/call
+   * (Bybit's per-request max). Used by the backtest candle cache — never called
+   * on the live trading path. Always reads from mainnet (see `marketDataClient`
+   * above) — real historical prices don't depend on which environment trades.
+   */
+  async getKline(symbol: string, timeframe: TimeframeId, startMs: number, endMs: number): Promise<Kline[]> {
+    const interval = BYBIT_INTERVAL[timeframe];
+    const intervalMs = TIMEFRAME_MS[timeframe];
+    const results: Kline[] = [];
+    let cursorStart = startMs;
+    let page = 0;
+
+    while (cursorStart <= endMs) {
+      // A long backtest window (e.g. 2 years of 5m data) can page through this loop 200+ times
+      // in a row — throttle proactively, and check retCode *inside* the retried call so a
+      // rate-limit response (a normal 200 with a non-zero retCode, not a thrown network error)
+      // becomes something withRetry can actually catch and back off on. See isRetryable.
+      if (page > 0) await sleep(PAGINATION_DELAY_MS);
+      page++;
+
+      const res = await withRetry(async () => {
+        const r = await this.marketDataClient.getKline({ category: "linear", symbol, interval, start: cursorStart, end: endMs, limit: 1000 });
+        if (r.retCode !== 0) bybitError(r);
+        return r;
+      }, isRetryable);
+
+      // Bybit returns newest-first; normalise to ascending order.
+      const batch = res.result.list
+        .map((k) => ({
+          openTime: Number(k[0]),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        }))
+        .sort((a, b) => a.openTime - b.openTime);
+
+      if (batch.length === 0) break;
+      results.push(...batch);
+
+      if (batch.length < 1000) break; // exhausted available data in range
+      cursorStart = batch[batch.length - 1]!.openTime + intervalMs;
+    }
+
+    return results;
+  }
+
+  /**
+   * Fetch historical funding rate settlements for [startMs, endMs], paginating forward 200
+   * entries/call (Bybit's per-request max for this endpoint). Used by the backtest funding
+   * store — funding interval varies by symbol (not every 8h for every symbol), so unlike
+   * getKline this cursors by the last returned timestamp + 1ms rather than a fixed step. Same
+   * mainnet-only rationale as getKline: real funding history, independent of testnet mode.
+   */
+  async getFundingHistory(symbol: string, startMs: number, endMs: number): Promise<FundingRateEntry[]> {
+    const results: FundingRateEntry[] = [];
+    let cursorStart = startMs;
+    let page = 0;
+
+    while (cursorStart <= endMs) {
+      // Same proactive throttling + in-loop retCode check as getKline — see its comment.
+      if (page > 0) await sleep(PAGINATION_DELAY_MS);
+      page++;
+
+      const res = await withRetry(async () => {
+        const r = await this.marketDataClient.getFundingRateHistory({ category: "linear", symbol, startTime: cursorStart, endTime: endMs, limit: 200 });
+        if (r.retCode !== 0) bybitError(r);
+        return r;
+      }, isRetryable);
+
+      // Bybit returns newest-first; normalise to ascending order.
+      const batch = res.result.list
+        .map((f) => ({
+          fundingTime: Number(f.fundingRateTimestamp),
+          fundingRate: Number(f.fundingRate),
+        }))
+        .sort((a, b) => a.fundingTime - b.fundingTime);
+
+      if (batch.length === 0) break;
+      results.push(...batch);
+
+      if (batch.length < 200) break; // exhausted available data in range
+      cursorStart = batch[batch.length - 1]!.fundingTime + 1;
+    }
+
     return results;
   }
 }

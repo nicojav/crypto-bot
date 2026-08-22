@@ -92,6 +92,59 @@ model FundingEvent {
   @@index([symbol, execTime])
 }
 
+// Cached OHLCV candles for the backtesting tool — downloaded once per symbol+timeframe
+// from Bybit and reused across backtest runs (see apps/bot/src/backtest/candleStore.ts).
+model Candle {
+  id        Int    @id @default(autoincrement())
+  symbol    String
+  timeframe String   // 5m | 15m | 4h | 1d | 1w
+  openTime  Int      // bar open time, ms epoch
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float
+
+  @@unique([symbol, timeframe, openTime])
+  @@index([symbol, timeframe, openTime])
+}
+
+// Cached funding-rate settlement history for the backtesting tool — downloaded once per symbol
+// from Bybit and accrued against open positions by the engine (see
+// apps/bot/src/backtest/fundingStore.ts, engine.ts's EngineConfig.fundingRates). Unlike Candle
+// this has no timeframe dimension: funding settles on its own schedule (commonly every 8h, but
+// Bybit docs note it varies by symbol) independent of whatever candle timeframe a backtest uses.
+model FundingRate {
+  id          Int    @id @default(autoincrement())
+  symbol      String
+  fundingTime Int    // settlement time, ms epoch
+  fundingRate Float  // e.g. 0.0001 = 0.01%; positive = longs pay shorts
+
+  @@unique([symbol, fundingTime])
+  @@index([symbol, fundingTime])
+}
+
+// Background param-search job runs, started manually from the dashboard's "Strategy Finder"
+// panel (backtest/optimizationRunner.ts) — coarse-grid search + out-of-sample validation
+// across strategy x symbol x timeframe, so results are ranked defensibly rather than by
+// raw (likely overfit) in-sample PnL. configJson/resultsJson are JSON blobs to avoid a
+// migration per new field; resultsJson is capped to a bounded top-N by the runner and
+// updated as the run progresses (see MAX_STORED_RESULTS in optimizationRunner.ts).
+model OptimizationRun {
+  id           Int      @id @default(autoincrement())
+  status       String   @default("running") // running | done | error | cancelled
+  configJson   String   // AutoOptimizeConfig snapshot
+  resultsJson  String   @default("[]") // CellResult[], bounded top-N, ranked by out-of-sample score
+  cellsTotal   Int      @default(0)
+  cellsDone    Int      @default(0)
+  backtestsRun Int      @default(0)
+  error        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
+
 // Persistent audit trail for reconciliation anomalies (dropped fills, qty drift, phantom
 // promotions, unmatched closedPnl lookups). Console logs are ephemeral — Railway's log
 // retention doesn't reach back far enough to forensically investigate an issue reported

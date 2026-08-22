@@ -4,6 +4,6 @@ buildCommand = "npm run build --workspace apps/dashboard"
 
 [deploy]
 startCommand = "npm start --workspace apps/dashboard"
-healthcheckPath = "/"
+healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

@@ -22,6 +22,7 @@ A TradingView → Webhook → Bybit Futures trading bot with a React dashboard, 
 | 9 | [phase-09-deployment](phase-09-deployment/) | Deployment | Pending |
 | 10 | [phase-10-observability](phase-10-observability/) | Observability & alerts | Pending |
 | 11 | [phase-11-hardening](phase-11-hardening/) | Hardening before real money | Pending |
+| 12 | [phase-12-backtesting](phase-12-backtesting/) | In-app backtesting tool | Planned |
 
 ---
 

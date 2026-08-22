@@ -2,8 +2,14 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { BotEvent } from "../api/client";
 
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
-const WS_URL = BASE.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+// Same rationale as api/client.ts: production connects same-origin through the dashboard's own
+// server (which proxies to the bot's authenticated WS endpoint — see server/createServer.js and
+// apps/bot/src/ws.ts's verifyClient). VITE_API_URL, when set, is a local-dev-only override for
+// talking directly to a bot with no proxy in front of it.
+const RAW_BASE = import.meta.env.VITE_API_URL as string | undefined;
+const WS_URL = RAW_BASE
+  ? RAW_BASE.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
 export function useWebSocket() {
   const qc = useQueryClient();

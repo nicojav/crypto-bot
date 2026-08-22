@@ -1,4 +1,9 @@
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3000";
+// Production default is same-origin ("") — the dashboard's own server (server/createServer.js)
+// proxies /api/* to the bot, injecting the real API_TOKEN server-side, so the browser never
+// needs to see it. VITE_API_URL/VITE_API_TOKEN stay supported for local dev only (talking
+// directly to a bot running on a different port with no proxy in front of it) — set them in
+// apps/dashboard/.env, which is never used for a production build.
+const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 const TOKEN = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? "";
 
 export type Bot = {
@@ -99,11 +104,15 @@ export type BotEvent =
   | { type: "ws.reconnected"; data: { disconnectedMs: number } };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  // Only set Content-Type when there's an actual body — Fastify's default JSON body parser
+  // rejects a bodyless request that claims application/json (FST_ERR_CTP_EMPTY_JSON_BODY),
+  // which broke every bodyless POST (e.g. the optimize/auto cancel and kill-switch routes).
   const res = await fetch(`${BASE}${path}`, {
     ...init,
+    credentials: "same-origin", // send the dashboard's own session cookie (see server/createServer.js)
     headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TOKEN}`,
+      ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
+      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}), // dev-only direct-to-bot path
       ...(init?.headers ?? {}),
     },
   });
@@ -173,3 +182,282 @@ export const fetchSignals = (params?: { botId?: number; limit?: number }) => {
 
 export const postKillSwitch = () =>
   req<{ disabled: number }>("/api/kill-switch", { method: "POST" });
+
+// ── Backtesting ────────────────────────────────────────────────────────────
+
+export type BacktestTimeframe = "5m" | "15m" | "4h" | "1d" | "1w";
+
+export type BacktestStrategyParam = {
+  name: string;
+  label: string;
+  default: number;
+  min: number;
+  max: number;
+  step: number;
+  /** When present, render as a select — the value is still a number (index into this list). */
+  options?: string[];
+  /** Only show this param when `params[showIf.param] === showIf.equals`. */
+  showIf?: { param: string; equals: number };
+};
+
+export type BacktestStrategy = {
+  id: string;
+  label: string;
+  description: string;
+  params: BacktestStrategyParam[];
+  supportsPine: boolean;
+};
+
+export type BacktestExitReason = "tp" | "sl" | "liquidation" | "reversal" | "windowEnd";
+
+export type BacktestTrade = {
+  entryTime: number;
+  exitTime: number;
+  side: "BUY" | "SELL";
+  entryPrice: number;
+  exitPrice: number;
+  qty: number;
+  sizeUsd: number;
+  pnlUsd: number;
+  pnlPct: number;
+  feeUsd: number;
+  /** Funding paid (positive) or received (negative) over the trade's life — already netted into pnlUsd. */
+  fundingUsd: number;
+  barsHeld: number;
+  exitReason: BacktestExitReason;
+  /** Max adverse excursion while open, in % (negative or zero). */
+  maePct: number;
+  /** Max favorable excursion while open, in % (positive or zero). */
+  mfePct: number;
+};
+
+export type BacktestEquityPoint = { time: number; equity: number };
+
+export type BacktestHistogramBin = { rangeStart: number; rangeEnd: number; count: number };
+
+export type BacktestExitReasonBreakdown = { exitReason: BacktestExitReason; count: number; avgPnlUsd: number };
+
+export type BacktestMonthlyReturn = { month: string; returnPct: number };
+
+export type BacktestStats = {
+  totalPnlUsd: number;
+  totalPnlPct: number;
+  maxDrawdownUsd: number;
+  maxDrawdownPct: number;
+  totalTrades: number;
+  winners: number;
+  losers: number;
+  breakevens: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  avgPnlUsd: number;
+  avgPnlPct: number;
+  avgBarsHeld: number;
+  largestProfitUsd: number;
+  largestLossUsd: number;
+  avgProfitPct: number;
+  avgLossPct: number;
+  returnsHistogram: BacktestHistogramBin[];
+  sharpeRatio: number;
+  sortinoRatio: number;
+  calmarRatio: number;
+  /** Average trade PnL in units of the average loss size. null when there are no losing trades. */
+  expectancy: number | null;
+  /** % of bars in the window spent holding a position. */
+  exposurePct: number;
+  maxConsecutiveLosses: number;
+  exitReasonBreakdown: BacktestExitReasonBreakdown[];
+  monthlyReturns: BacktestMonthlyReturn[];
+};
+
+export type BacktestMarker = { time: number; price: number; kind: "long" | "short" | "exit"; exitReason?: string };
+
+export type BacktestRunResult = {
+  stats: BacktestStats;
+  trades: BacktestTrade[];
+  equityCurve: BacktestEquityPoint[];
+  buyHoldCurve: BacktestEquityPoint[];
+  markers: BacktestMarker[];
+  /** Present when the request set compareFillModel — the opposite fill model's stats. */
+  fillModelComparison?: { fillModel: "signalClose" | "nextOpen"; stats: BacktestStats };
+  /** Present when the request set sensitivityCheck — stats at 2x slippage and 2x fees. */
+  sensitivityComparison?: { slippageBps: number; feeBps: number; stats: BacktestStats };
+};
+
+export type BacktestCandle = { openTime: number; open: number; high: number; low: number; close: number; volume: number };
+
+export const fetchBacktestStrategies = () => req<BacktestStrategy[]>("/api/backtest/strategies");
+
+export const fetchBacktestPine = (strategyId: string, params: Record<string, number>) =>
+  req<{ pine: string }>(`/api/backtest/strategies/${strategyId}/pine`, { method: "POST", body: JSON.stringify({ params }) });
+
+export const runBacktest = (body: {
+  strategyId: string;
+  params: Record<string, number>;
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  from: string;
+  to: string;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+  maintenanceMarginRate?: number;
+  compareFillModel?: boolean;
+  sensitivityCheck?: boolean;
+}) => req<BacktestRunResult>("/api/backtest/run", { method: "POST", body: JSON.stringify(body) });
+
+export const fetchBacktestCandles = (params: { symbol: string; timeframe: BacktestTimeframe; from: string; to: string }) => {
+  const q = new URLSearchParams({ symbol: params.symbol, timeframe: params.timeframe, from: params.from, to: params.to });
+  return req<{ candles: BacktestCandle[]; truncated: boolean; totalAvailable: number }>(`/api/backtest/candles?${q}`);
+};
+
+export type OptimizeSweepParam = { param: string; min: number; max: number; step: number };
+
+export type BacktestOptimizeResult = { params: Record<string, number>; stats: BacktestStats };
+
+export type BacktestOptimizeResponse = {
+  totalCombinations: number;
+  evaluatedCombinations: number;
+  filteredOutCount: number;
+  results: BacktestOptimizeResult[];
+};
+
+export const runBacktestOptimize = (body: {
+  strategyId: string;
+  baseParams: Record<string, number>;
+  sweep: OptimizeSweepParam[];
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  from: string;
+  to: string;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+  minTrades?: number;
+}) => req<BacktestOptimizeResponse>("/api/backtest/optimize", { method: "POST", body: JSON.stringify(body) });
+
+// ── Strategy Finder (auto strategy/param search) ────────────────────────────
+
+export type ScoreWeights = {
+  sharpeWeight: number;
+  profitFactorWeight: number;
+  pnlWeight: number;
+  drawdownPenalty: number;
+  minTrades: number;
+};
+
+export type AutoOptimizeCellResult = {
+  strategyId: string;
+  symbol: string;
+  timeframe: BacktestTimeframe;
+  params: Record<string, number>;
+  trainStats: BacktestStats;
+  validateStats: BacktestStats;
+  holdoutStats: BacktestStats;
+  trainScore: number;
+  validateScore: number;
+  holdoutScore: number;
+  /** validateScore / trainScore — this is what the finalist was actually selected on. */
+  validateRatio: number;
+  /** holdoutScore / trainScore — genuinely untouched by selection; the trustworthy number. */
+  holdoutRatio: number;
+  combosEvaluated: number;
+  /** One score per walk-forward fold — present only when the run requested walkForwardFolds > 1.
+   * validateScore above is their mean. */
+  walkForwardScores?: number[];
+};
+
+export type AutoOptimizeRunStatus = "running" | "done" | "error" | "cancelled";
+
+export type AutoOptimizeRun = {
+  id: number;
+  status: AutoOptimizeRunStatus;
+  cellsTotal: number;
+  cellsDone: number;
+  backtestsRun: number;
+  error: string | null;
+  createdAt: string;
+  results: AutoOptimizeCellResult[];
+};
+
+export type AutoOptimizeRunSummary = {
+  id: number;
+  status: AutoOptimizeRunStatus;
+  cellsTotal: number;
+  cellsDone: number;
+  createdAt: string;
+};
+
+export const startAutoOptimize = (body: {
+  symbols: string[];
+  timeframes: BacktestTimeframe[];
+  strategyIds?: string[];
+  from: string;
+  to: string;
+  validateFraction?: number;
+  holdoutFraction?: number;
+  /** Opt-in — omit for a single continuous validate-slice score; 2+ aggregates that many rolling
+   * validate folds instead, so a config can't hide behind a good blended average. */
+  walkForwardFolds?: number;
+  minTrades?: number;
+  scoreWeights?: Partial<ScoreWeights>;
+  initialCapital?: number;
+  maxPositionUsd?: number;
+  leverage?: number;
+  feeBps?: number;
+  slippageBps?: number;
+  fillModel?: "signalClose" | "nextOpen";
+}) => req<{ runId: number }>("/api/backtest/optimize/auto", { method: "POST", body: JSON.stringify(body) });
+
+export const getAutoOptimizeRun = (runId: number) => req<AutoOptimizeRun>(`/api/backtest/optimize/auto/${runId}`);
+
+export const listAutoOptimizeRuns = () => req<AutoOptimizeRunSummary[]>("/api/backtest/optimize/auto");
+
+export const cancelAutoOptimizeRun = (runId: number) =>
+  req<{ cancelled: boolean }>(`/api/backtest/optimize/auto/${runId}/cancel`, { method: "POST" });
+
+export const deleteAutoOptimizeRun = (runId: number) =>
+  req<{ deleted: boolean }>(`/api/backtest/optimize/auto/${runId}`, { method: "DELETE" });
+
+// ── Storage (DB size tracking + candle/funding-rate cache prune) ───────────
+
+export type StorageTableStats = {
+  rowCount: number;
+  /** ms epoch of the earliest cached row, or null when the table is empty. */
+  oldest: number | null;
+  /** ms epoch of the most recent cached row, or null when the table is empty. */
+  newest: number | null;
+};
+
+export type StorageStats = {
+  dbSizeBytes: number;
+  volumeSizeBytes: number;
+  percentUsed: number;
+  criticalThresholdPct: number;
+  candles: StorageTableStats;
+  fundingRates: StorageTableStats;
+};
+
+export const fetchStorageStats = () => req<StorageStats>("/api/storage/stats");
+
+export type PruneCandlesResult = { dryRun: boolean; candles: number; fundingRates: number };
+
+export const previewPruneCandles = (params: { olderThanDays: number; symbol?: string; timeframe?: BacktestTimeframe }) => {
+  const q = new URLSearchParams({ olderThanDays: String(params.olderThanDays) });
+  if (params.symbol) q.set("symbol", params.symbol);
+  if (params.timeframe) q.set("timeframe", params.timeframe);
+  return req<PruneCandlesResult>(`/api/storage/candles?${q}`, { method: "DELETE" });
+};
+
+export const pruneCandles = (params: { olderThanDays: number; symbol?: string; timeframe?: BacktestTimeframe }) => {
+  const q = new URLSearchParams({ olderThanDays: String(params.olderThanDays), confirm: "true" });
+  if (params.symbol) q.set("symbol", params.symbol);
+  if (params.timeframe) q.set("timeframe", params.timeframe);
+  return req<PruneCandlesResult>(`/api/storage/candles?${q}`, { method: "DELETE" });
+};

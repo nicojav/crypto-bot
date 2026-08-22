@@ -9,6 +9,7 @@ import { EquityBreakdown } from "../components/EquityBreakdown";
 import { OpenPositions } from "../components/OpenPositions";
 import { SignalsTable } from "../components/SignalsTable";
 import { TradesTable } from "../components/TradesTable";
+import { StoragePanel } from "../components/StoragePanel";
 import { useState } from "react";
 
 export default function DashboardPage() {
@@ -126,6 +127,8 @@ export default function DashboardPage() {
           <SignalsTable />
           <TradesTable />
         </div>
+
+        <StoragePanel />
       </main>
 
       <CreateBotDialog

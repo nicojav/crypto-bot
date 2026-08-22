@@ -41,6 +41,14 @@ export const Header: FC<HeaderProps> = ({ equityUsd, todayPnl, anyBotEnabled, on
             >
               Trades
             </NavLink>
+            <NavLink
+              to="/backtest"
+              className={({ isActive }) =>
+                `text-sm font-medium transition-colors ${isActive ? "text-text-1" : "text-text-3 hover:text-text-1"}`
+              }
+            >
+              Backtest
+            </NavLink>
           </nav>
         </div>
 
