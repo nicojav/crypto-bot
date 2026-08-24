@@ -777,7 +777,10 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
   // Use simulateTpSlError=true to place extreme TP/SL offsets that trigger Bybit's price-band
   // check (30208/10001), verifying the naked-entry fallback works. No-op in dryRun mode
   // (dryRun never calls Bybit, so the band error never fires).
-  fastify.post<{ Params: IdParams; Body: { action: "BUY" | "SELL"; simulateTpSlError?: boolean } }>(
+  fastify.post<{
+    Params: IdParams;
+    Body: { action: "BUY" | "SELL"; simulateTpSlError?: boolean; tpPct?: number; slPct?: number };
+  }>(
     "/api/bots/:id/test-signal",
     {
       schema: {
@@ -789,6 +792,11 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
           properties: {
             action:            { type: "string", enum: ["BUY", "SELL"] },
             simulateTpSlError: { type: "boolean" },
+            // Optional bracket override — takes precedence over simulateTpSlError, since the
+            // processor's percentage path wins over absolute prices (SignalProcessor tpPct/slPct
+            // branch runs before the legacy takeProfit/stopLoss fallback).
+            tpPct:             { type: "number", exclusiveMinimum: 0 },
+            slPct:             { type: "number", exclusiveMinimum: 0 },
           },
         },
         response: {
@@ -802,7 +810,7 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
     },
     async (req, reply) => {
       const { id } = req.params;
-      const { action, simulateTpSlError = false } = req.body;
+      const { action, simulateTpSlError = false, tpPct, slPct } = req.body;
 
       const bot = await db.bot.findUnique({ where: { id } });
       if (!bot) return reply.status(404).send({ error: "Not found" });
@@ -815,6 +823,10 @@ export const apiPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: BybitClie
         price: refPrice,
         meta: { _test: true },  // surfaced as isTest in the dashboard
       };
+      if (tpPct != null) payload.tpPct = tpPct;
+      if (slPct != null) payload.slPct = slPct;
+      // tpPct/slPct win over this in the processor, so simulateTpSlError is a no-op if either
+      // is also supplied — intentional, see the schema comment above.
       if (simulateTpSlError) {
         payload.takeProfit = action === "BUY" ? refPrice + 1.0 : refPrice * 0.5;
         payload.stopLoss   = action === "BUY" ? refPrice * 0.5 : refPrice + 1.0;

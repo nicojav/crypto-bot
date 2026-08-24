@@ -192,6 +192,49 @@ describe("POST /webhook/:botId", () => {
     const signal = await testDb.signal.findUnique({ where: { webhookId: body.webhookId } });
     expect(signal?.action).toBe("CLOSE");
   });
+
+  // Regression guard: tpPct/slPct is the preferred bracket path for all current Pine
+  // strategies (see SignalProcessor), but the schema previously only accepted absolute
+  // takeProfit/stopLoss — zod's default (non-strict) object silently stripped tpPct/slPct
+  // on the way in, so every live signal from those strategies placed a naked order.
+  it("tpPct/slPct → 202 and persisted into signal.payload", async () => {
+    const body = { ...validBody(), tpPct: 12.3456, slPct: 2.4691, webhookId: `tv-tpsl-${Math.random()}` };
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhook/${botId}`,
+      payload: body,
+    });
+    expect(res.statusCode).toBe(202);
+
+    const signal = await testDb.signal.findUnique({ where: { webhookId: body.webhookId } });
+    const payload = JSON.parse(signal!.payload!);
+    expect(payload.tpPct).toBe(12.3456);
+    expect(payload.slPct).toBe(2.4691);
+  });
+
+  it("no bracket fields → tpPct/slPct absent from signal.payload", async () => {
+    const body = validBody();
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhook/${botId}`,
+      payload: body,
+    });
+    expect(res.statusCode).toBe(202);
+
+    const signal = await testDb.signal.findUnique({ where: { webhookId: body.webhookId } });
+    const payload = JSON.parse(signal!.payload!);
+    expect(payload.tpPct).toBeUndefined();
+    expect(payload.slPct).toBeUndefined();
+  });
+
+  it("negative tpPct → 400", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhook/${botId}`,
+      payload: { ...validBody(), tpPct: -1 },
+    });
+    expect(res.statusCode).toBe(400);
+  });
 });
 
 describe("GET /health", () => {
