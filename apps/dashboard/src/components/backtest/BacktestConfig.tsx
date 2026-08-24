@@ -41,6 +41,16 @@ const toDateInput = (d: Date) => d.toISOString().slice(0, 10);
 const defaultFrom = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 5); return toDateInput(d); };
 const defaultTo = () => toDateInput(new Date());
 
+// Never throws — a <input type="date"> value can be transiently "" while the user is clearing
+// it to type a new one, and `new Date("T00:00:00Z").toISOString()` throws a RangeError that
+// crashes the whole page since runConfigBase below is rebuilt on every render, not just on
+// submit. Returns "" for anything unparseable instead, so the caller can treat it as "not ready
+// yet" rather than the app crashing mid-edit.
+function toIsoSafe(dateStr: string, timeSuffix: string): string {
+  const d = new Date(`${dateStr}${timeSuffix}`);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
 // A "load these params into the form" request from another panel (e.g. Strategy Finder).
 // `token` is bumped by the caller on every load so the effect below re-applies even when
 // the exact same strategy/symbol is loaded twice in a row.
@@ -146,13 +156,16 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
     }
   }
 
-  // Shared execution config, reused by both "Run backtest" and the optimizer panel.
+  // Shared execution config, reused by both "Run backtest" and the optimizer panel. from/to can
+  // briefly be "" while the user is mid-edit on a date field — toIsoSafe returns "" rather than
+  // throwing in that case, and hasValidWindow below gates both the Run button and handleRun so
+  // an in-progress edit can't be submitted, instead of crashing the page (see toIsoSafe).
   const runConfigBase = {
     strategyId,
     symbol,
     timeframe,
-    from: new Date(`${from}T00:00:00Z`).toISOString(),
-    to: new Date(`${to}T23:59:59Z`).toISOString(),
+    from: toIsoSafe(from, "T00:00:00Z"),
+    to: toIsoSafe(to, "T23:59:59Z"),
     initialCapital: Number(initialCapital) || 10_000,
     maxPositionUsd: Number(maxPositionUsd) || 1_000,
     leverage: Number(leverage) || 5,
@@ -163,9 +176,10 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
     compareFillModel,
     sensitivityCheck,
   };
+  const hasValidWindow = runConfigBase.from !== "" && runConfigBase.to !== "";
 
   function handleRun() {
-    if (!strategyId || !symbol) return;
+    if (!strategyId || !symbol || !hasValidWindow) return;
     onRun({ ...runConfigBase, params });
   }
 
@@ -287,7 +301,8 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
         </button>
         <button
           onClick={handleRun}
-          disabled={isRunning || !strategyId || !symbol}
+          disabled={isRunning || !strategyId || !symbol || !hasValidWindow}
+          title={!hasValidWindow ? "Pick a valid From/To date range" : undefined}
           className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-green text-base hover:bg-green/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {isRunning ? "Running…" : "Run backtest"}

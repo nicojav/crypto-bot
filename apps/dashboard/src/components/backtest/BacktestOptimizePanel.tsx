@@ -167,7 +167,8 @@ export const BacktestOptimizePanel: FC<BacktestOptimizePanelProps> = ({ sweepabl
             </span>
             <button
               onClick={handleRunOptimize}
-              disabled={sweep.length === 0 || overCap || mutation.isPending}
+              disabled={sweep.length === 0 || overCap || mutation.isPending || !runConfigBase.from || !runConfigBase.to}
+              title={!runConfigBase.from || !runConfigBase.to ? "Pick a valid From/To date range" : undefined}
               className="px-4 py-2 rounded-xl text-sm font-semibold bg-green text-base hover:bg-green/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {mutation.isPending ? "Optimizing…" : "Run optimization"}

@@ -35,6 +35,13 @@ const toDateInput = (d: Date) => d.toISOString().slice(0, 10);
 const defaultFrom = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 3); return toDateInput(d); };
 const defaultTo = () => toDateInput(new Date());
 
+// Never throws — see the identical helper in BacktestConfig.tsx. A <input type="date"> value can
+// be "" mid-edit; returns "" instead of letting toISOString() throw and crash the page.
+function toIsoSafe(dateStr: string, timeSuffix: string): string {
+  const d = new Date(`${dateStr}${timeSuffix}`);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
 const fmtPct = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const signedPct = (v: number) => `${v >= 0 ? "+" : ""}${fmtPct.format(v)}%`;
 const pnlColor = (v: number) => (v >= 0 ? "text-green" : "text-red");
@@ -159,8 +166,10 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
     });
   }
 
+  const isoFrom = toIsoSafe(from, "T00:00:00Z");
+  const isoTo = toIsoSafe(to, "T23:59:59Z");
   const cellCount = strategyIds.size * symbols.length * timeframes.size;
-  const canStart = !isRunning && !startMutation.isPending && symbols.length > 0 && timeframes.size > 0 && strategyIds.size > 0;
+  const canStart = !isRunning && !startMutation.isPending && symbols.length > 0 && timeframes.size > 0 && strategyIds.size > 0 && isoFrom !== "" && isoTo !== "";
 
   function handleStart() {
     if (!canStart) return;
@@ -168,8 +177,8 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       symbols,
       timeframes: [...timeframes],
       strategyIds: [...strategyIds],
-      from: new Date(`${from}T00:00:00Z`).toISOString(),
-      to: new Date(`${to}T23:59:59Z`).toISOString(),
+      from: isoFrom,
+      to: isoTo,
       validateFraction: Number(validateFraction) || 0.15,
       holdoutFraction: Number(holdoutFraction) || 0.15,
       walkForwardFolds: walkForwardEnabled ? Number(walkForwardFolds) || undefined : undefined,
@@ -184,13 +193,17 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
   }
 
   function handleLoad(r: AutoOptimizeCellResult) {
+    if (isoFrom === "" || isoTo === "") {
+      toast.error("Pick a valid From/To date range first");
+      return;
+    }
     onLoadIntoBacktest({
       strategyId: r.strategyId,
       params: r.params,
       symbol: r.symbol,
       timeframe: r.timeframe,
-      from: new Date(`${from}T00:00:00Z`).toISOString(),
-      to: new Date(`${to}T23:59:59Z`).toISOString(),
+      from: isoFrom,
+      to: isoTo,
     });
     toast.success("Loaded into Single backtest — switch tabs to run it");
   }
