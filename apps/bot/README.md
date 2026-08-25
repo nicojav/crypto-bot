@@ -6,6 +6,9 @@ See the [root README](../../README.md) for the system-wide diagram and setup ins
 
 ## Architecture
 
+Live trading and reconciliation — see [Backtesting & Strategy Finder](#backtesting--strategy-finder)
+and [Storage](#storage) below for the other two diagrams.
+
 ```mermaid
 graph TB
     TV["TradingView"] -->|"POST /webhook/:botId"| WH["routes/webhook.ts"]
@@ -35,19 +38,31 @@ graph TB
     BUS["eventBus.ts<br/>(EventEmitter)"] --> WSS["ws.ts<br/>(WS server)"]
     BUS --> NOTIFIER["notifications/notifier.ts<br/>(Telegram)"]
 
-    STORAGEMON["storage/storageMonitor.ts<br/>(periodic, 6h)"] -->|getStorageStats| CANDLE
-    STORAGEMON -->|getStorageStats| FUNDING
-    STORAGEMON -. "publishes storage.critical<br/>(24h cooldown)" .-> BUS
-    STORAGEAPI["storage/storageRoutes.ts<br/>(GET stats, DELETE candles)"] -->|reads/prunes| CANDLE
-    STORAGEAPI -->|reads/prunes| FUNDING
-    DASH -->|REST| STORAGEAPI
-
     DASH["apps/dashboard"] -->|REST| API
     DASH -->|WebSocket| WSS
 
     CLI["scripts/backfillRealizedPnlGrouped.ts<br/>(manual CLI)"] --> PNLB
     DIAG["scripts/dumpClosedPnl.ts<br/>(read-only diagnostic)"] --> BYBIT_REST
     DIAG2["scripts/dumpReconciliationEvents.ts<br/>(read-only diagnostic)"] --> REVENT
+```
+
+## Signal → Trade lifecycle
+
+1. **Webhook** (`routes/webhook.ts`) validates a TradingView alert against the bot's `webhookId`/symbol and stores it as a `Signal` row with `status: PENDING`.
+2. **SignalProcessor** (`processor/signalProcessor.ts`) polls for the oldest `PENDING` signal every 500ms. For an entry, it places a market order via `exchange/bybit.ts`, creates a `Trade` row immediately (before any enrichment call, so a placed order is never orphaned), then best-effort corrects `qty`/`entryPrice` from `getOrderFill` (which waits for a terminal order status before returning — see `bybit.ts`). For an opposite-side signal, it first places a reduce-only close order and marks the existing trade(s) `CLOSING`.
+3. **Reconciler** (`reconciliation/reconciler.ts`) subscribes to Bybit's private WebSocket (`position`/`order`/`execution`/`wallet` topics):
+   - An `order` fill event either hydrates an opening trade's real fill price/qty, or (if `reduceOnly`) closes the matching trade(s) with Bybit's authoritative `closedPnl`. If the fill can't find a matching `OPEN`/`CLOSING` trade (e.g. it was already closed), the fill is dropped and logged as a `FILL_DROPPED` reconciliation event.
+   - A `position` size-0 event sweeps any remaining `OPEN`/`CLOSING` trades for that symbol via `closeRemainingOpenTrades` — tries `getClosedPnL` first (via the shared `closedPnlMatcher`), then `getExecutionList` as a local-formula fallback (`pnlSource: EXEC_FALLBACK`). It never decides `PHANTOM` itself (Bybit's data can lag a just-closed position by minutes, so an immediate decision risks zeroing out a real trade) — see the periodic sweep below.
+   - A periodic sweep (every 60s, `runReconciliation`) checks live Bybit positions against `OPEN`/`CLOSING` trades for mismatches.
+   - A separate periodic sweep (every 5min, `runPnlBackfill` → `pnlBackfill.ts`) retries `EXEC_FALLBACK`/null-source trades closed in the last 48h — closing the gap left by the one-shot live attempt above. A single-row trade held under 5s with still no Bybit evidence after a 15-minute grace period is promoted to `PHANTOM` here, once we're confident it's not just indexing lag.
+   - Notable anomalies (dropped fills, qty drift, phantom promotions, unmatched lookups) are persisted to `ReconciliationEvent` via `reconciliation/reconciliationLog.ts`, since console logs don't survive Railway's log retention window — query them with `npm run dump:reconciliation-events`.
+4. **Dashboard** reads trade/equity/position state via `routes/api.ts` (REST) and receives live updates over `ws.ts`'s WebSocket server, fed by the internal `eventBus.ts`.
+
+## Backtesting & Strategy Finder
+
+```mermaid
+graph TB
+    DASH["apps/dashboard"] -->|REST| BTAPI
 
     BTAPI["backtest/backtestRoutes.ts<br/>(GET strategies, POST run, POST optimize,<br/>POST/GET optimize/auto(+cancel/delete),<br/>GET candles, POST :id/pine)"] -->|ensureCandles| CSTORE["backtest/candleStore.ts"]
     CSTORE -->|"getKline (missing ranges only)"| BYBIT_MAINNET["Bybit REST API<br/>(mainnet, public — always real prices,<br/>independent of BYBIT_TESTNET)"]
@@ -55,14 +70,17 @@ graph TB
     BTAPI -->|ensureFundingRates| FSTORE["backtest/fundingStore.ts"]
     FSTORE -->|"getFundingHistory (missing ranges only)"| BYBIT_MAINNET
     FSTORE -->|upsert/read| FUNDING[("FundingRate")]
-    BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets, composable<br/>customMaCross, bbMeanReversion scalper)"]
+    BTAPI -->|"strategy.run(candles, params)"| STRAT["backtest/strategies/*.ts<br/>(Pine-mirrored presets, composable<br/>customMaCross/bbMeanReversion,<br/>session-anchored sessionOrb/<br/>sessionVwapReversion)"]
     STRAT -->|toPine| PINEGEN["backtest/strategies/pineExport.ts"]
+    STRAT -->|"buildRegimeGate<br/>(customMaCross, bbMeanReversion)"| REGIME["backtest/strategies/regimeFilter.ts<br/>(ADX / vol-percentile / session gate)"]
+    STRAT -->|"sessionIds, sessionVwap"| SESS["backtest/sessions.ts<br/>(UTC session anchors)"]
+    REGIME --> SESS
 
     BTAPI -->|"runFull / runStats<br/>(per-request pool)"| POOL["backtest/workerPool.ts<br/>(fixed worker_thread pool —<br/>keeps every backtest off this<br/>process's event loop)"]
     POOL -->|"pack once per candle array,<br/>share by reference"| CBUF["backtest/candleBuffer.ts<br/>(columnar SharedArrayBuffer)"]
     POOL -->|postMessage task| WORKER["backtest/backtestWorker.ts<br/>(worker_thread — unpacks candles,<br/>runs strategy.run + engine + stats,<br/>optionally scoreResult)"]
     WORKER -->|runOneBacktest| OPT["backtest/optimizer.ts<br/>(param-sweep + shared run helper)"]
-    OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick;<br/>accrues funding, approximates<br/>liquidation, intrabar drawdown)"]
+    OPT -->|runBacktestEngine| ENGINE["backtest/engine.ts<br/>(reuses calcQty/roundToTick;<br/>accrues funding, approximates<br/>liquidation, intrabar drawdown;<br/>flat/timeStop exits, per-side<br/>entry/exit fees)"]
     ENGINE --> STATS["backtest/stats.ts"]
     WORKER -.->|"scoreResult (score-kind tasks)"| SCORING["backtest/scoring.ts<br/>(Sharpe/Calmar + risk-adjusted<br/>composite score, not raw PnL)"]
 
@@ -72,7 +90,6 @@ graph TB
     RUNNER -->|"searchCell (pool in opts)"| SEARCH["backtest/search.ts<br/>(coarse grid → refine, LHS sampling,<br/>train/validate/holdout split,<br/>optional walk-forward folds)"]
     SEARCH -->|runScored, dispatched concurrently| POOL
     RUNNER -->|"progress + bounded top-N results"| OPTRUN[("OptimizationRun")]
-    DASH -->|REST| BTAPI
 ```
 
 `backtest/workerPool.ts` replaced running backtests synchronously inline in `backtestRoutes.ts` and
@@ -87,19 +104,7 @@ unpacks and caches its own `Candle[]` view the first time it sees a given array)
 falls back to its original in-process sequential path when no pool is supplied (e.g. in tests
 using ad-hoc `StrategyDefinition` objects a worker thread couldn't resolve by id).
 
-## Signal → Trade lifecycle
-
-1. **Webhook** (`routes/webhook.ts`) validates a TradingView alert against the bot's `webhookId`/symbol and stores it as a `Signal` row with `status: PENDING`.
-2. **SignalProcessor** (`processor/signalProcessor.ts`) polls for the oldest `PENDING` signal every 500ms. For an entry, it places a market order via `exchange/bybit.ts`, creates a `Trade` row immediately (before any enrichment call, so a placed order is never orphaned), then best-effort corrects `qty`/`entryPrice` from `getOrderFill` (which waits for a terminal order status before returning — see `bybit.ts`). For an opposite-side signal, it first places a reduce-only close order and marks the existing trade(s) `CLOSING`.
-3. **Reconciler** (`reconciliation/reconciler.ts`) subscribes to Bybit's private WebSocket (`position`/`order`/`execution`/`wallet` topics):
-   - An `order` fill event either hydrates an opening trade's real fill price/qty, or (if `reduceOnly`) closes the matching trade(s) with Bybit's authoritative `closedPnl`. If the fill can't find a matching `OPEN`/`CLOSING` trade (e.g. it was already closed), the fill is dropped and logged as a `FILL_DROPPED` reconciliation event.
-   - A `position` size-0 event sweeps any remaining `OPEN`/`CLOSING` trades for that symbol via `closeRemainingOpenTrades` — tries `getClosedPnL` first (via the shared `closedPnlMatcher`), then `getExecutionList` as a local-formula fallback (`pnlSource: EXEC_FALLBACK`). It never decides `PHANTOM` itself (Bybit's data can lag a just-closed position by minutes, so an immediate decision risks zeroing out a real trade) — see the periodic sweep below.
-   - A periodic sweep (every 60s, `runReconciliation`) checks live Bybit positions against `OPEN`/`CLOSING` trades for mismatches.
-   - A separate periodic sweep (every 5min, `runPnlBackfill` → `pnlBackfill.ts`) retries `EXEC_FALLBACK`/null-source trades closed in the last 48h — closing the gap left by the one-shot live attempt above. A single-row trade held under 5s with still no Bybit evidence after a 15-minute grace period is promoted to `PHANTOM` here, once we're confident it's not just indexing lag.
-   - Notable anomalies (dropped fills, qty drift, phantom promotions, unmatched lookups) are persisted to `ReconciliationEvent` via `reconciliation/reconciliationLog.ts`, since console logs don't survive Railway's log retention window — query them with `npm run dump:reconciliation-events`.
-4. **Dashboard** reads trade/equity/position state via `routes/api.ts` (REST) and receives live updates over `ws.ts`'s WebSocket server, fed by the internal `eventBus.ts`.
-
-## Strategy Finder (auto strategy/param search)
+### Strategy Finder (auto strategy/param search)
 
 Brute-forcing every parameter combination for a strategy is infeasible (one strategy can have
 enough numeric params at fine steps to produce billions of combos), and ranking by raw
@@ -114,7 +119,11 @@ instead of running inline in the request:
    expand to their few discrete values; a `showIf`-gated param only varies in branches where
    its gate holds), scores every combo with `scoring.ts`'s risk-adjusted `scoreResult`
    (Sharpe/Calmar/profit-factor, not raw PnL%), then **refines** a finer grid around the best
-   regions.
+   regions. A per-branch floor (`GridBudget.minCombosPerBranch`) keeps every enum branch
+   meaningfully sampled — without it, a strategy with several independent gates (e.g.
+   `customMaCross`'s regime/session filter on top of its existing MA-type/TP-SL-mode gates)
+   would split a fixed combo budget across dozens of branches down to one or two samples each,
+   quietly making the search worse as more useful params are added.
 3. Candles are split into three chronological chunks up front — **train** (search optimizes
    here), **validate** (a shortlist is re-scored here; this is what actually decides the final
    ranking), and **holdout** (evaluated only for the already-chosen finalists, purely for
@@ -141,6 +150,20 @@ instead of running inline in the request:
    history (409s if it's still the active run — cancel it first).
 
 ## Storage
+
+```mermaid
+graph LR
+    STORAGEMON["storage/storageMonitor.ts<br/>(periodic, 6h)"] -->|getStorageStats| CANDLE[("Candle")]
+    STORAGEMON -->|getStorageStats| FUNDING[("FundingRate")]
+    STORAGEMON -. "publishes storage.critical<br/>(24h cooldown)" .-> BUS["eventBus.ts"]
+    BUS --> NOTIFIER["notifications/notifier.ts<br/>(Telegram)"]
+    BUS --> WSS["ws.ts<br/>(WS server)"]
+
+    STORAGEAPI["storage/storageRoutes.ts<br/>(GET stats, DELETE candles)"] -->|reads/prunes| CANDLE
+    STORAGEAPI -->|reads/prunes| FUNDING
+    DASH["apps/dashboard"] -->|REST| STORAGEAPI
+    DASH -->|WebSocket| WSS
+```
 
 The whole SQLite file (live trading tables and the backtest `Candle`/`FundingRate` cache) lives
 on a single 1 GB Railway Volume. Live trading tables grow slowly and predictably; the backtest
@@ -170,3 +193,4 @@ the volume.
 | `npm run mark-phantoms` | Mark trades with no corresponding Bybit record as `PHANTOM` |
 | `npm run check-bybit` | Verify Bybit API connectivity, balance, and positions |
 | `npm run reset-trade-data` | Wipe trades/signals on the deployed bot (see root README) |
+| `npm run compare-strategies -- --symbols X,Y --timeframe 15m --strategies a,b [--walkForward N]` | Read-only: runs the real `searchCell` search against cached candles for a hand-picked strategy set and prints train/validate/holdout PnL% + Fit% side by side — a quick "does this actually clear holdout" check without the dashboard or an `OptimizationRun` row |
