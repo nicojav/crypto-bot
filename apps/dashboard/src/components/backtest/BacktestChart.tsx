@@ -95,7 +95,16 @@ export const BacktestChart: FC<BacktestChartProps> = ({ symbol, timeframe, from,
         if (m.kind === "short") {
           return { time: toSeconds(m.time), position: "aboveBar", shape: "arrowDown", color: "#f87171", text: "Short" };
         }
-        const exitColor = m.exitReason === "tp" ? "#34d399" : m.exitReason === "sl" ? "#f87171" : "#fbbf24";
+        // tp/sl are the bracket outcomes (green/red, matching every other win/loss color in this
+        // chart family). flat/timeStop are the strategy's own planned exits, not a bracket touch —
+        // neither win nor loss on their own — so they get the same blue used for buy & hold
+        // elsewhere in this family, rather than sharing amber with the true catch-all
+        // (reversal/windowEnd).
+        const exitColor =
+          m.exitReason === "tp" ? "#34d399" :
+          m.exitReason === "sl" ? "#f87171" :
+          m.exitReason === "flat" || m.exitReason === "timeStop" ? "#60a5fa" :
+          "#fbbf24";
         return { time: toSeconds(m.time), position: "inBar", shape: "circle", color: exitColor, text: "Exit" };
       });
 

@@ -2,7 +2,7 @@ import { calcQty, roundToTick } from "../processor/signalProcessor.js";
 import type { Candle } from "./types.js";
 import type { SignalEvent } from "./strategies/types.js";
 
-export type ExitReason = "tp" | "sl" | "liquidation" | "reversal" | "windowEnd";
+export type ExitReason = "tp" | "sl" | "liquidation" | "reversal" | "windowEnd" | "flat" | "timeStop";
 
 export interface BacktestTrade {
   entryTime: number;
@@ -47,7 +47,17 @@ export interface EngineConfig {
   /** Margin per trade — mirrors the bot's Bot.maxPositionUsd (actual notional = this × leverage). */
   maxPositionUsd: number;
   leverage: number;
+  /** Fee charged on both sides unless `entryFeeBps`/`exitFeeBps` override it. */
   feeBps: number;
+  /**
+   * Per-side fee overrides, each falling back to `feeBps`. A limit entry (an ORB retest, a VWAP
+   * fade) rests on the book and pays the maker rate — ~2bps on Bybit against ~5.5bps taker —
+   * while the exit still crosses the spread. Charging taker on both sides roughly doubles the
+   * assumed drag, which on intraday timeframes is enough on its own to sink an otherwise viable
+   * strategy, so the two sides are modelable independently.
+   */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps: number;
   fillModel: "signalClose" | "nextOpen";
   lotSize: number;
@@ -78,6 +88,8 @@ interface OpenPosition {
   takeProfitPrice: number | null;
   stopLossPrice: number | null;
   liquidationPrice: number | null;
+  /** Bars to hold before the time stop force-closes — see SignalEvent.maxBarsHeld. Null = no time stop. */
+  maxBarsHeld: number | null;
   feeOpenUsd: number;
   /** Running total of funding accrued while this position has been open — see FundingRatePoint. */
   fundingPaidUsd: number;
@@ -86,19 +98,30 @@ interface OpenPosition {
   mfePct: number;
 }
 
+/**
+ * Resolves a signal's TP and SL to absolute prices at the fill. Each side is resolved
+ * *independently*, so a signal may carry a stop without a target — needed by strategies whose
+ * exit target is a moving level (session VWAP) that a static price can't express, and which
+ * therefore exit via a "flat" signal while still wanting a hard stop underneath.
+ *
+ * Percentage takes precedence over ATR-multiple per side, though no strategy currently mixes them.
+ */
 function resolveBracket(signal: SignalEvent, fillPrice: number, tickSize: number): { tp: number | null; sl: number | null } {
-  if (signal.tpPct != null && signal.slPct != null) {
-    const tp = signal.action === "long" ? fillPrice * (1 + signal.tpPct / 100) : fillPrice * (1 - signal.tpPct / 100);
-    const sl = signal.action === "long" ? fillPrice * (1 - signal.slPct / 100) : fillPrice * (1 + signal.slPct / 100);
-    return { tp: roundToTick(tp, tickSize), sl: roundToTick(sl, tickSize) };
-  }
-  if (signal.tpAtrMult != null && signal.slAtrMult != null && signal.atrAtSignal != null) {
-    const offset = signal.atrAtSignal;
-    const tp = signal.action === "long" ? fillPrice + offset * signal.tpAtrMult : fillPrice - offset * signal.tpAtrMult;
-    const sl = signal.action === "long" ? fillPrice - offset * signal.slAtrMult : fillPrice + offset * signal.slAtrMult;
-    return { tp: roundToTick(tp, tickSize), sl: roundToTick(sl, tickSize) };
-  }
-  return { tp: null, sl: null };
+  const dir = signal.action === "long" ? 1 : -1;
+  const atrOffset = signal.atrAtSignal;
+
+  let tp: number | null = null;
+  if (signal.tpPct != null) tp = fillPrice * (1 + (dir * signal.tpPct) / 100);
+  else if (signal.tpAtrMult != null && atrOffset != null) tp = fillPrice + dir * atrOffset * signal.tpAtrMult;
+
+  let sl: number | null = null;
+  if (signal.slPct != null) sl = fillPrice * (1 - (dir * signal.slPct) / 100);
+  else if (signal.slAtrMult != null && atrOffset != null) sl = fillPrice - dir * atrOffset * signal.slAtrMult;
+
+  return {
+    tp: tp == null ? null : roundToTick(tp, tickSize),
+    sl: sl == null ? null : roundToTick(sl, tickSize),
+  };
 }
 
 /** Approximate isolated-margin liquidation price. Ignores the insurance fund, partial
@@ -112,7 +135,7 @@ function resolveLiquidationPrice(side: "BUY" | "SELL", fillPrice: number, levera
   return side === "BUY" ? fillPrice * (1 - cushion) : fillPrice * (1 + cushion);
 }
 
-function buildPosition(signal: SignalEvent, rawFillPrice: number, fillTime: number, barIndex: number, config: EngineConfig, feeRate: number, slippageRate: number): OpenPosition | null {
+function buildPosition(signal: SignalEvent, rawFillPrice: number, fillTime: number, barIndex: number, config: EngineConfig, entryFeeRate: number, slippageRate: number): OpenPosition | null {
   const side: "BUY" | "SELL" = signal.action === "long" ? "BUY" : "SELL";
   const adj = rawFillPrice * slippageRate;
   const fillPrice = side === "BUY" ? rawFillPrice + adj : rawFillPrice - adj;
@@ -121,15 +144,16 @@ function buildPosition(signal: SignalEvent, rawFillPrice: number, fillTime: numb
 
   const { tp, sl } = resolveBracket(signal, fillPrice, config.tickSize);
   const liquidationPrice = resolveLiquidationPrice(side, fillPrice, config.leverage, config.maintenanceMarginRate);
-  const feeOpenUsd = fillPrice * qty * feeRate;
-  return { side, qty, entryPrice: fillPrice, entryTime: fillTime, entryBarIndex: barIndex, takeProfitPrice: tp, stopLossPrice: sl, liquidationPrice, feeOpenUsd, fundingPaidUsd: 0, maePct: 0, mfePct: 0 };
+  const feeOpenUsd = fillPrice * qty * entryFeeRate;
+  const maxBarsHeld = signal.maxBarsHeld != null && signal.maxBarsHeld > 0 ? signal.maxBarsHeld : null;
+  return { side, qty, entryPrice: fillPrice, entryTime: fillTime, entryBarIndex: barIndex, takeProfitPrice: tp, stopLossPrice: sl, liquidationPrice, maxBarsHeld, feeOpenUsd, fundingPaidUsd: 0, maePct: 0, mfePct: 0 };
 }
 
 // TP fills at the exact touched level — no slippage modeled there (optimistic exits aren't the
 // risk this models). SL and liquidation fills slip through the trigger level and handle a bar
 // that gaps straight past it (barOpen already beyond the stop) by filling at the worse of the
-// two. Signal-driven exits (reversal/windowEnd) are market-order fills, slippage against the
-// closing side.
+// two. Everything else (reversal/windowEnd/flat/timeStop) is a market-order fill, slippage
+// against the closing side.
 function resolveExitPrice(position: OpenPosition, rawExitPrice: number, exitReason: ExitReason, barOpen: number, slippageRate: number): number {
   if (exitReason === "tp") return rawExitPrice;
   if (exitReason === "sl" || exitReason === "liquidation") {
@@ -141,9 +165,9 @@ function resolveExitPrice(position: OpenPosition, rawExitPrice: number, exitReas
   return position.side === "BUY" ? rawExitPrice - adj : rawExitPrice + adj;
 }
 
-function buildTrade(position: OpenPosition, exitPrice: number, exitTime: number, exitBarIndex: number, exitReason: ExitReason, feeRate: number): BacktestTrade {
+function buildTrade(position: OpenPosition, exitPrice: number, exitTime: number, exitBarIndex: number, exitReason: ExitReason, exitFeeRate: number): BacktestTrade {
   const grossPnl = (exitPrice - position.entryPrice) * position.qty * (position.side === "BUY" ? 1 : -1);
-  const feeCloseUsd = exitPrice * position.qty * feeRate;
+  const feeCloseUsd = exitPrice * position.qty * exitFeeRate;
   const netPnl = grossPnl - position.feeOpenUsd - feeCloseUsd - position.fundingPaidUsd;
   return {
     entryTime: position.entryTime,
@@ -178,15 +202,17 @@ function markToMarket(position: OpenPosition | null, cash: number, price: number
  * math (calcQty/roundToTick, direction-aware %/ATR TP-SL re-anchored to the fill price) so
  * results reflect how *this bot* would have traded, not TradingView's Strategy Tester.
  *
- * Priority when multiple exits could trigger on the same bar: liquidation > SL > TP — a real
- * exchange forces liquidation regardless of the trader's own SL/TP, and (like the existing SL-
- * over-TP rule) a single bar's high/low touching both is resolved conservatively.
+ * Priority when multiple exits could trigger on the same bar: liquidation > SL > TP > timeStop —
+ * a real exchange forces liquidation regardless of the trader's own SL/TP, (like the existing SL-
+ * over-TP rule) a single bar's high/low touching both is resolved conservatively, and the time
+ * stop comes last because it resolves at the bar's close while the others were touched intrabar.
  */
 export function runBacktestEngine(candles: readonly Candle[], signals: readonly SignalEvent[], config: EngineConfig): EngineResult {
   const signalsByBar = new Map<number, SignalEvent>();
   for (const s of signals) signalsByBar.set(s.barIndex, s);
 
-  const feeRate = config.feeBps / 10_000;
+  const entryFeeRate = (config.entryFeeBps ?? config.feeBps) / 10_000;
+  const exitFeeRate = (config.exitFeeBps ?? config.feeBps) / 10_000;
   const slippageRate = config.slippageBps / 10_000;
   const fundingRates = config.fundingRates ?? [];
 
@@ -261,21 +287,36 @@ export function runBacktestEngine(candles: readonly Candle[], signals: readonly 
         position.takeProfitPrice != null &&
         (position.side === "BUY" ? bar.high >= position.takeProfitPrice : bar.low <= position.takeProfitPrice);
 
+      // Time stop is checked last: it fires on the bar's close, so any price-triggered exit that
+      // was actually touched intrabar (liquidation/SL/TP) takes priority over it on the same bar.
+      const hitTimeStop =
+        !hitLiquidation &&
+        !hitSl &&
+        !hitTp &&
+        position.maxBarsHeld != null &&
+        i - position.entryBarIndex >= position.maxBarsHeld;
+
       if (hitLiquidation) {
         const exitPrice = resolveExitPrice(position, position.liquidationPrice!, "liquidation", bar.open, slippageRate);
-        const trade = buildTrade(position, exitPrice, bar.openTime, i, "liquidation", feeRate);
+        const trade = buildTrade(position, exitPrice, bar.openTime, i, "liquidation", exitFeeRate);
         cash += trade.pnlUsd;
         trades.push(trade);
         position = null;
       } else if (hitSl) {
         const exitPrice = resolveExitPrice(position, position.stopLossPrice!, "sl", bar.open, slippageRate);
-        const trade = buildTrade(position, exitPrice, bar.openTime, i, "sl", feeRate);
+        const trade = buildTrade(position, exitPrice, bar.openTime, i, "sl", exitFeeRate);
         cash += trade.pnlUsd;
         trades.push(trade);
         position = null;
       } else if (hitTp) {
         const exitPrice = resolveExitPrice(position, position.takeProfitPrice!, "tp", bar.open, slippageRate);
-        const trade = buildTrade(position, exitPrice, bar.openTime, i, "tp", feeRate);
+        const trade = buildTrade(position, exitPrice, bar.openTime, i, "tp", exitFeeRate);
+        cash += trade.pnlUsd;
+        trades.push(trade);
+        position = null;
+      } else if (hitTimeStop) {
+        const exitPrice = resolveExitPrice(position, bar.close, "timeStop", bar.open, slippageRate);
+        const trade = buildTrade(position, exitPrice, bar.openTime, i, "timeStop", exitFeeRate);
         cash += trade.pnlUsd;
         trades.push(trade);
         position = null;
@@ -283,22 +324,35 @@ export function runBacktestEngine(candles: readonly Candle[], signals: readonly 
     }
 
     // b) Process this bar's signal, if any — reversal closes the opposite side first, then opens.
+    //    A "flat" signal closes whatever is open and opens nothing; with no position open it is a
+    //    deliberate no-op, since strategies emit it without knowing their own position state.
     const signal = signalsByBar.get(i);
     if (signal) {
       const fillPriceRaw = resolveFillPrice(i);
       if (fillPriceRaw != null) {
         const fillTime = resolveFillTime(i);
-        const desiredSide: "BUY" | "SELL" = signal.action === "long" ? "BUY" : "SELL";
 
-        if (position && position.side !== desiredSide) {
-          const exitPrice = resolveExitPrice(position, fillPriceRaw, "reversal", bar.open, slippageRate);
-          const trade = buildTrade(position, exitPrice, fillTime, i, "reversal", feeRate);
-          cash += trade.pnlUsd;
-          trades.push(trade);
-          position = null;
-        }
-        if (!position) {
-          position = buildPosition(signal, fillPriceRaw, fillTime, i, config, feeRate, slippageRate);
+        if (signal.action === "flat") {
+          if (position) {
+            const exitPrice = resolveExitPrice(position, fillPriceRaw, "flat", bar.open, slippageRate);
+            const trade = buildTrade(position, exitPrice, fillTime, i, "flat", exitFeeRate);
+            cash += trade.pnlUsd;
+            trades.push(trade);
+            position = null;
+          }
+        } else {
+          const desiredSide: "BUY" | "SELL" = signal.action === "long" ? "BUY" : "SELL";
+
+          if (position && position.side !== desiredSide) {
+            const exitPrice = resolveExitPrice(position, fillPriceRaw, "reversal", bar.open, slippageRate);
+            const trade = buildTrade(position, exitPrice, fillTime, i, "reversal", exitFeeRate);
+            cash += trade.pnlUsd;
+            trades.push(trade);
+            position = null;
+          }
+          if (!position) {
+            position = buildPosition(signal, fillPriceRaw, fillTime, i, config, entryFeeRate, slippageRate);
+          }
         }
       }
     }
@@ -307,7 +361,7 @@ export function runBacktestEngine(candles: readonly Candle[], signals: readonly 
     //    date-range strategies' "Date window end" flatten so results report cleanly).
     if (i === candles.length - 1 && position) {
       const exitPrice = resolveExitPrice(position, bar.close, "windowEnd", bar.open, slippageRate);
-      const trade = buildTrade(position, exitPrice, bar.openTime, i, "windowEnd", feeRate);
+      const trade = buildTrade(position, exitPrice, bar.openTime, i, "windowEnd", exitFeeRate);
       cash += trade.pnlUsd;
       trades.push(trade);
       position = null;

@@ -452,6 +452,11 @@ describe("POST /api/backtest/optimize/auto", () => {
     const final = await app.inject({ method: "GET", url: `/api/backtest/optimize/auto/${runId}`, headers: AUTH });
     expect(final.json().status).toBe("done");
     expect(final.json().cellsDone).toBe(1);
+    // The run's requested range must round-trip out of its configJson snapshot — this is what
+    // the Strategy Finder panel uses to keep "Load" and the date inputs in sync with whichever
+    // run is on screen, instead of the panel's current (possibly stale) form state.
+    expect(final.json().from).toBe(FROM);
+    expect(final.json().to).toBe(TO);
   }, 20_000);
 });
 
@@ -480,15 +485,31 @@ describe("GET /api/backtest/optimize/auto/:runId", () => {
       trainScore: 1, validateScore: 1, holdoutScore: 1, validateRatio: 1, holdoutRatio: 1, combosEvaluated: 1,
     };
     const run = await testDb.optimizationRun.create({
-      data: { status: "done", configJson: "{}", cellsTotal: 1, cellsDone: 1, resultsJson: JSON.stringify([cellResult]) },
+      data: {
+        status: "done", configJson: JSON.stringify({ from: FROM, to: TO }),
+        cellsTotal: 1, cellsDone: 1, resultsJson: JSON.stringify([cellResult]),
+      },
     });
     const res = await app.inject({ method: "GET", url: `/api/backtest/optimize/auto/${run.id}`, headers: AUTH });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.id).toBe(run.id);
     expect(body.status).toBe("done");
+    expect(body.from).toBe(FROM);
+    expect(body.to).toBe(TO);
     expect(body.results).toHaveLength(1);
     expect(body.results[0].strategyId).toBe("emaCross");
+  });
+
+  it("malformed configJson → from/to null instead of 500", async () => {
+    const run = await testDb.optimizationRun.create({
+      data: { status: "error", configJson: "not json", cellsTotal: 1, cellsDone: 0 },
+    });
+    const res = await app.inject({ method: "GET", url: `/api/backtest/optimize/auto/${run.id}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.from).toBeNull();
+    expect(body.to).toBeNull();
   });
 });
 
@@ -506,6 +527,17 @@ describe("GET /api/backtest/optimize/auto", () => {
     for (let i = 1; i < body.length; i++) {
       expect(new Date(body[i - 1].createdAt).getTime()).toBeGreaterThanOrEqual(new Date(body[i].createdAt).getTime());
     }
+  });
+
+  it("echoes each run's from/to so the panel can sync its date inputs on history selection", async () => {
+    const run = await testDb.optimizationRun.create({
+      data: { status: "done", configJson: JSON.stringify({ from: FROM, to: TO }), cellsTotal: 1, cellsDone: 1 },
+    });
+    const res = await app.inject({ method: "GET", url: "/api/backtest/optimize/auto", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const row = res.json().find((r: { id: number }) => r.id === run.id);
+    expect(row.from).toBe(FROM);
+    expect(row.to).toBe(TO);
   });
 });
 

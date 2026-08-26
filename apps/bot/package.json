@@ -18,6 +18,7 @@
     "backfill:pnl-grouped": "tsx src/scripts/backfillRealizedPnlGrouped.ts",
     "repair:history": "tsx src/scripts/repairHistory.ts",
     "dump:closed-pnl": "tsx src/scripts/dumpClosedPnl.ts",
+    "compare-strategies": "tsx src/scripts/compareStrategies.ts",
     "dump:reconciliation-events": "tsx src/scripts/dumpReconciliationEvents.ts"
   },
   "prisma": {

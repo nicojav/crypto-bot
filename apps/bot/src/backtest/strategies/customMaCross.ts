@@ -1,5 +1,6 @@
 import { ema, sma, rsi, atr, crossover, crossunder } from "../indicators.js";
 import { pineForCustomMaCross } from "./pineExport.js";
+import { REGIME_PARAM_DEFS, buildRegimeGate } from "./regimeFilter.js";
 import type { StrategyDefinition, SignalEvent, SignalAction } from "./types.js";
 
 // TP/SL mode indices (kept in sync with the `tpslMode` param's `options` labels below).
@@ -33,6 +34,10 @@ export const customMaCross: StrategyDefinition = {
     { name: "tpAtrMult", label: "TP ATR mult", default: 3.0, min: 0.1, max: 10, step: 0.1, showIf: { param: "tpslMode", equals: TPSL_ATR } },
     { name: "tpPct", label: "TP %", default: 1.5, min: 0.1, max: 50, step: 0.1, showIf: { param: "tpslMode", equals: TPSL_PCT } },
     { name: "slPct", label: "SL %", default: 0.75, min: 0.1, max: 50, step: 0.1, showIf: { param: "tpslMode", equals: TPSL_PCT } },
+    // A crossover fires whenever two averages touch, regardless of whether anything is actually
+    // happening — survivable on daily bars, ruinous on 5m. The gate defaults to Off so existing
+    // configs are unchanged; "Trending" is the one that makes this viable intraday.
+    ...REGIME_PARAM_DEFS,
   ],
   run(candles, params) {
     const fastMaType = params.fastMaType ?? MA_EMA;
@@ -55,11 +60,13 @@ export const customMaCross: StrategyDefinition = {
     const slowMA = slowMaType === MA_SMA ? sma(closes, slowLen) : ema(closes, slowLen);
     const rsiSeries = useRsiFilter ? rsi(closes, rsiLen) : null;
     const atrSeries = tpslMode === TPSL_ATR ? atr(candles, atrLen) : null;
+    const regimeAllows = buildRegimeGate(candles, params);
 
     const events: SignalEvent[] = [];
     for (let i = 0; i < candles.length; i++) {
       if (useRsiFilter && rsiSeries![i] == null) continue; // RSI not warmed up yet
       if (tpslMode === TPSL_ATR && atrSeries![i] == null) continue; // ATR not warmed up yet
+      if (!regimeAllows(i)) continue; // conditions don't favor trading right now — see regimeFilter.ts
 
       const isLongCross = crossover(fastMA, slowMA, i);
       const isShortCross = crossunder(fastMA, slowMA, i);

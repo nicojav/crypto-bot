@@ -71,6 +71,30 @@ export const BacktestAnalysis: FC<{ stats: BacktestStats }> = ({ stats }) => {
         />
       </div>
 
+      {/* Absent on runs persisted before these fields existed — see BacktestStats in api/client.ts. */}
+      {stats.avgGrossPnlPct != null && stats.avgCostPct != null && stats.costDragPct != null && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
+          <Stat
+            label="Avg gross PnL / trade"
+            help="Mean price return per trade BEFORE fees and funding. Compare this against avg cost / trade below — a strategy can have a real, positive edge here and still lose money once cost exceeds it. That's the difference between 'no edge' and 'edge, but costs ate it', which a single PnL number can't tell apart."
+            value={signedPct(stats.avgGrossPnlPct)}
+            color={pnlColor(stats.avgGrossPnlPct)}
+          />
+          <Stat
+            label="Avg cost / trade"
+            help="Mean fees + funding per trade, as a % of that trade's entry notional. On intraday timeframes with frequent trading, this is usually the real reason a strategy with a genuine gross edge still loses — see avg gross PnL / trade."
+            value={signedPct(stats.avgCostPct)}
+            color="text-red"
+          />
+          <Stat
+            label="Total cost drag"
+            help="All fees + funding paid across the whole backtest, as a % of initial capital. The headline 'what did it cost to run this' number."
+            value={signedPct(-stats.costDragPct)}
+            color="text-red"
+          />
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-8">
         <div>
           <div className="data-label mb-3">Returns distribution</div>

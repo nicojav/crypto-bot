@@ -250,4 +250,101 @@ describe("runBacktestEngine", () => {
     expect(trades[0]!.mfePct).toBeCloseTo(10, 6); // bar1 low 90 is favorable for a short (100 -> 90 = +10%)
     expect(trades[0]!.maePct).toBeCloseTo(-5, 6); // bar1 high 105 is adverse for a short (100 -> 105 = -5%)
   });
+  // ── flat signal, time stop, and per-side fees ────────────────────────────────
+
+  it("closes on a flat signal without opening anything new", () => {
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 112, 100, 110), candle(2, 110, 110, 110, 110)];
+    const signals: SignalEvent[] = [
+      { barIndex: 0, time: 0, action: "long" },
+      { barIndex: 1, time: 1, action: "flat" },
+    ];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    // Exactly one trade: the flat closed it, and crucially did not re-open in either direction —
+    // a second trade here would mean "flat" was being treated as a reversal.
+    expect(trades).toHaveLength(1);
+    expect(trades[0]).toMatchObject({ side: "BUY", entryPrice: 100, exitPrice: 110, exitReason: "flat" });
+  });
+
+  it("treats a flat signal with no open position as a no-op", () => {
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 105, 95, 100)];
+    // Strategies emit flat without knowing their own position state, so a flat landing on a bar
+    // with nothing open has to be silently ignored rather than opening or throwing.
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "flat" }];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades).toHaveLength(0);
+  });
+
+  it("force-closes at the time stop once maxBarsHeld bars have elapsed", () => {
+    const candles = [
+      candle(0, 100, 100, 100, 100),
+      candle(1, 100, 101, 99, 100),
+      candle(2, 100, 101, 99, 102),
+      candle(3, 102, 103, 101, 103),
+    ];
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "long", maxBarsHeld: 2 }];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades).toHaveLength(1);
+    expect(trades[0]!.exitReason).toBe("timeStop");
+    expect(trades[0]!.barsHeld).toBe(2);
+    expect(trades[0]!.exitPrice).toBe(102); // bar 2's close — a time stop resolves at the close, not intrabar
+  });
+
+  it("lets a same-bar SL touch win over the time stop", () => {
+    // Both could fire on bar 2. The SL was actually touched intrabar while the time stop only
+    // resolves at the close, so the conservative (and realistic) outcome is the stop.
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 101, 99, 100), candle(2, 100, 101, 90, 100)];
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "long", tpPct: 50, slPct: 5, maxBarsHeld: 2 }];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades[0]!.exitReason).toBe("sl");
+    expect(trades[0]!.exitPrice).toBe(95);
+  });
+
+  it("applies a stop with no take-profit when the signal carries only an SL", () => {
+    // Session VWAP reversion targets VWAP via a flat signal, so it emits a stop and no target.
+    // Before per-side bracket resolution this produced NO bracket at all, silently unstopping it.
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 130, 94, 96)];
+    const signals: SignalEvent[] = [{ barIndex: 0, time: 0, action: "long", slAtrMult: 1, atrAtSignal: 5 }];
+
+    const { trades } = runBacktestEngine(candles, signals, baseConfig);
+
+    expect(trades).toHaveLength(1);
+    expect(trades[0]!.exitReason).toBe("sl");
+    expect(trades[0]!.exitPrice).toBe(95);
+  });
+
+  it("charges entry and exit fees independently when per-side rates are set", () => {
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 100, 100, 100)];
+    const signals: SignalEvent[] = [
+      { barIndex: 0, time: 0, action: "long" },
+      { barIndex: 1, time: 1, action: "flat" },
+    ];
+    // Maker in (2bps), taker out (10bps), on a flat 100-price round trip of qty 10 (notional 1000).
+    const config: EngineConfig = { ...baseConfig, feeBps: 99, entryFeeBps: 2, exitFeeBps: 10 };
+
+    const { trades } = runBacktestEngine(candles, signals, config);
+
+    // feeBps is fully overridden on both sides, so it must not leak into the total.
+    expect(trades[0]!.feeUsd).toBeCloseTo(1000 * 0.0002 + 1000 * 0.001, 9);
+  });
+
+  it("falls back to feeBps on whichever side has no override", () => {
+    const candles = [candle(0, 100, 100, 100, 100), candle(1, 100, 100, 100, 100)];
+    const signals: SignalEvent[] = [
+      { barIndex: 0, time: 0, action: "long" },
+      { barIndex: 1, time: 1, action: "flat" },
+    ];
+    const config: EngineConfig = { ...baseConfig, feeBps: 10, entryFeeBps: 2 };
+
+    const { trades } = runBacktestEngine(candles, signals, config);
+
+    expect(trades[0]!.feeUsd).toBeCloseTo(1000 * 0.0002 + 1000 * 0.001, 9);
+  });
 });

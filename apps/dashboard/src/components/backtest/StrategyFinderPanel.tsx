@@ -18,7 +18,7 @@ import {
   type Bot,
 } from "../../api/client";
 import { Select } from "../ui/Select";
-import { Field } from "../ui/Field";
+import { Field, FIELD_HEADER_CLASS } from "../ui/Field";
 import { Tooltip } from "../ui/Tooltip";
 
 const TIMEFRAMES: { value: BacktestTimeframe; label: string }[] = [
@@ -40,6 +40,15 @@ const defaultTo = () => toDateInput(new Date());
 function toIsoSafe(dateStr: string, timeSuffix: string): string {
   const d = new Date(`${dateStr}${timeSuffix}`);
   return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
+// Inverse of toIsoSafe, for syncing the From/To inputs to a run's actual range (e.g. when
+// selecting an older run from history). Never throws — returns null for an unparseable/missing
+// ISO string so the caller can leave the existing input alone instead of clobbering it.
+function fromIsoToDateInput(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : toDateInput(d);
 }
 
 const fmtPct = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -88,6 +97,9 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
   const [maxPositionUsd, setMaxPositionUsd] = useState("1000");
   const [leverage, setLeverage] = useState("5");
   const [feeBps, setFeeBps] = useState("5.5");
+  // Blank = same as the fee above (taker on both sides) — see the identical field in
+  // BacktestConfig.tsx.
+  const [entryFeeBps, setEntryFeeBps] = useState("");
   const [slippageBps, setSlippageBps] = useState("2");
   const [fillModel, setFillModel] = useState<"signalClose" | "nextOpen">("signalClose");
   const [runId, setRunId] = useState<number | null>(null);
@@ -187,13 +199,21 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       maxPositionUsd: Number(maxPositionUsd) || 1_000,
       leverage: Number(leverage) || 5,
       feeBps: Number(feeBps) || 0,
+      ...(entryFeeBps.trim() !== "" ? { entryFeeBps: Number(entryFeeBps) || 0 } : {}),
       slippageBps: Number(slippageBps) || 0,
       fillModel,
     });
   }
 
   function handleLoad(r: AutoOptimizeCellResult) {
-    if (isoFrom === "" || isoTo === "") {
+    // Prefer the range the run was actually executed over (echoed by the API from its
+    // configJson snapshot) — falls back to the live form inputs only for a row whose config
+    // failed to parse, so Load always reflects the results on screen, not whatever the date
+    // fields happen to hold at click time (see StrategyFinderPanel exploration: the form and
+    // the displayed run can disagree after editing dates or switching runs from history).
+    const loadFrom = run?.from ?? isoFrom;
+    const loadTo = run?.to ?? isoTo;
+    if (!loadFrom || !loadTo) {
       toast.error("Pick a valid From/To date range first");
       return;
     }
@@ -202,10 +222,22 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       params: r.params,
       symbol: r.symbol,
       timeframe: r.timeframe,
-      from: isoFrom,
-      to: isoTo,
+      from: loadFrom,
+      to: loadTo,
     });
     toast.success("Loaded into Single backtest — switch tabs to run it");
+  }
+
+  // Selecting a run from history swaps the results table — also sync the date inputs to that
+  // run's actual range so the form never disagrees with what's on screen (and so Load, which
+  // falls back to the form when a run's range is unavailable, stays correct too).
+  function handleSelectRun(id: number) {
+    setRunId(id);
+    const summary = historyQuery.data?.find((r) => r.id === id);
+    const syncedFrom = fromIsoToDateInput(summary?.from);
+    const syncedTo = fromIsoToDateInput(summary?.to);
+    if (syncedFrom) setFrom(syncedFrom);
+    if (syncedTo) setTo(syncedTo);
   }
 
   return (
@@ -221,7 +253,9 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
 
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <div className="flex flex-col gap-1.5 col-span-2 sm:col-span-1">
-          <label className="data-label">Symbols</label>
+          <div className={FIELD_HEADER_CLASS}>
+            <label className="data-label">Symbols</label>
+          </div>
           <input
             type="text"
             list="finder-symbol-suggestions"
@@ -250,7 +284,12 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
       </div>
 
       <div>
-        <div className="data-label mb-2">Strategies</div>
+        <div className="data-label mb-2 flex items-center gap-1.5">
+          Strategies
+          <Tooltip text="Strategies with a regime/session filter (Custom MA Cross, BB Mean Reversion) or several independent enum modes (Session ORB, Session VWAP Reversion) run a wider per-branch search to keep every mode meaningfully sampled — expect those cells to take longer than a plain crossover.">
+            <span className="text-text-3 cursor-help">ⓘ</span>
+          </Tooltip>
+        </div>
         <div className="flex flex-wrap gap-2">
           {strategies.map((s) => (
             <button key={s.id} onClick={() => toggleStrategy(s.id)} className={chipClass(strategyIds.has(s.id))}>
@@ -267,10 +306,13 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
         <Field label="Initial capital" type="number" min="0" value={initialCapital} onChange={setInitialCapital} hint="USDT" />
         <Field label="Margin / trade" type="number" min="0" value={maxPositionUsd} onChange={setMaxPositionUsd} hint="USDT" />
         <Field label="Leverage" type="number" min="1" value={leverage} onChange={setLeverage} hint="x" />
-        <Field label="Taker fee" type="number" min="0" step="0.1" value={feeBps} onChange={setFeeBps} hint="bps" />
+        <Field label="Fee (taker)" type="number" min="0" step="0.1" value={feeBps} onChange={setFeeBps} hint="bps · both sides" />
+        <Field label="Entry fee (maker)" type="number" min="0" step="0.1" value={entryFeeBps} onChange={setEntryFeeBps} hint="bps · blank = fee" />
         <Field label="Slippage" type="number" min="0" step="0.1" value={slippageBps} onChange={setSlippageBps} hint="bps" />
         <div className="flex flex-col gap-1.5 min-w-0">
-          <label className="data-label">Fill model</label>
+          <div className={FIELD_HEADER_CLASS}>
+            <label className="data-label">Fill model</label>
+          </div>
           <Select
             value={fillModel}
             onChange={(v) => setFillModel(v as "signalClose" | "nextOpen")}
@@ -351,7 +393,7 @@ export const StrategyFinderPanel: FC<StrategyFinderPanelProps> = ({ onLoadIntoBa
         <RunHistory
           runs={historyQuery.data}
           activeRunId={runId}
-          onSelect={setRunId}
+          onSelect={handleSelectRun}
           onDelete={(id) => deleteMutation.mutate(id)}
         />
       )}
@@ -374,7 +416,10 @@ const RunProgress: FC<{
     <div className="bg-surface border border-border rounded-xl px-4 py-3 space-y-2">
       <div className="flex items-center justify-between text-xs">
         <span className={`font-mono font-medium uppercase tracking-wide ${statusColor}`}>Run #{run.id} — {run.status}</span>
-        <span className="text-text-3 font-mono">{run.cellsDone}/{run.cellsTotal} cells · {run.backtestsRun} backtests run</span>
+        <span className="text-text-3 font-mono">
+          {run.cellsDone}/{run.cellsTotal} cells · {run.backtestsRun} backtests run
+          {run.from && run.to && ` · ${fromIsoToDateInput(run.from)} → ${fromIsoToDateInput(run.to)}`}
+        </span>
       </div>
       <div className="h-1.5 bg-card rounded-full overflow-hidden">
         <div className="h-full bg-green transition-all duration-300" style={{ width: `${pct}%` }} />
@@ -570,7 +615,11 @@ const RunHistory: FC<{
           r.id === activeRunId ? "bg-green/15 border-green/40 text-green" : "bg-surface border-border text-text-3"
         }`}
       >
-        <button onClick={() => onSelect(r.id)} className="pl-3 pr-1.5 py-1.5 text-xs hover:text-text-1 transition-colors">
+        <button
+          onClick={() => onSelect(r.id)}
+          title={r.from && r.to ? `${fromIsoToDateInput(r.from)} → ${fromIsoToDateInput(r.to)}` : undefined}
+          className="pl-3 pr-1.5 py-1.5 text-xs hover:text-text-1 transition-colors"
+        >
           <span className="font-mono">#{r.id}</span> {r.status === "running" ? `${r.cellsDone}/${r.cellsTotal}` : r.status}
         </button>
         <button onClick={() => onDelete(r.id)} title="Delete run" className="pr-2 pl-1 py-1.5 hover:text-red transition-colors">
