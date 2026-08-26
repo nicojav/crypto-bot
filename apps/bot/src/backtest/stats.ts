@@ -53,6 +53,22 @@ export interface BacktestStats {
   expectancy: number | null;
   /** % of bars in the backtest window that held an open position (sum of barsHeld / bar count). */
   exposurePct: number;
+  /** Total trading fees paid across all trades (entry + exit). */
+  totalFeesUsd: number;
+  /** Total funding paid (positive) or received (negative) across all trades. */
+  totalFundingUsd: number;
+  /** Fees + funding as % of initial capital — the headline "what did it cost to run this". */
+  costDragPct: number;
+  /**
+   * Mean per-trade price edge BEFORE costs, in %. Compare directly against `avgCostPct`: these
+   * two numbers are the diagnostic for why a high-frequency config loses. A strategy can have a
+   * real, positive `avgGrossPnlPct` and still bleed to death because it pays `avgCostPct` to
+   * capture it — which on intraday timeframes is the usual story, and is otherwise invisible
+   * behind a single red PnL number.
+   */
+  avgGrossPnlPct: number;
+  /** Mean per-trade cost (fees + funding) as % of the position's entry notional. */
+  avgCostPct: number;
   /** Longest run of consecutive losing trades, in chronological order. */
   maxConsecutiveLosses: number;
   exitReasonBreakdown: ExitReasonBreakdown[];
@@ -240,6 +256,13 @@ export function computeStats(
   const avgLossUsd = losers.length > 0 ? mean(losers.map((t) => t.pnlUsd)) : 0;
   const totalBarsHeld = trades.reduce((sum, t) => sum + t.barsHeld, 0);
 
+  // Cost accounting. `trade.pnlPct` is already the raw entry→exit price return (documented as
+  // fee- and leverage-unadjusted), so it is the gross edge directly; costs are normalized against
+  // each trade's own entry notional so the two are expressed in the same units and comparable.
+  const totalFeesUsd = trades.reduce((sum, t) => sum + t.feeUsd, 0);
+  const totalFundingUsd = trades.reduce((sum, t) => sum + t.fundingUsd, 0);
+  const perTradeCostPct = trades.map((t) => (t.sizeUsd > 0 ? ((t.feeUsd + t.fundingUsd) / t.sizeUsd) * 100 : 0));
+
   return {
     totalPnlUsd,
     totalPnlPct,
@@ -264,6 +287,11 @@ export function computeStats(
     calmarRatio: computeCalmar(equityCurve, dd.pct),
     expectancy: avgLossUsd < 0 ? avgPnlUsd / Math.abs(avgLossUsd) : null,
     exposurePct: equityCurve.length > 0 ? (totalBarsHeld / equityCurve.length) * 100 : 0,
+    totalFeesUsd,
+    totalFundingUsd,
+    costDragPct: initialCapital > 0 ? ((totalFeesUsd + totalFundingUsd) / initialCapital) * 100 : 0,
+    avgGrossPnlPct: mean(trades.map((t) => t.pnlPct)),
+    avgCostPct: mean(perTradeCostPct),
     maxConsecutiveLosses: maxConsecutiveLosses(trades),
     exitReasonBreakdown: exitReasonBreakdown(trades),
     monthlyReturns: monthlyReturns(equityCurve),

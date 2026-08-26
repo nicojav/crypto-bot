@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { fetchBacktestStrategies, fetchBacktestPine, fetchBots, type BacktestTimeframe, type BacktestStrategyParam, type Bot } from "../../api/client";
 import { Select } from "../ui/Select";
-import { Field } from "../ui/Field";
+import { Field, FIELD_HEADER_CLASS } from "../ui/Field";
 import { Switch } from "../ui/Switch";
 import { BacktestOptimizePanel } from "./BacktestOptimizePanel";
 
@@ -22,6 +22,7 @@ export interface BacktestRunConfig {
   maxPositionUsd: number;
   leverage: number;
   feeBps: number;
+  entryFeeBps?: number;
   slippageBps: number;
   fillModel: "signalClose" | "nextOpen";
   maintenanceMarginRate?: number;
@@ -87,6 +88,11 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
   const [maxPositionUsd, setMaxPositionUsd] = useState("1000");
   const [leverage, setLeverage] = useState("5");
   const [feeBps, setFeeBps] = useState("5.5");
+  // Blank = same as the fee above (taker on both sides). ORB retests and VWAP fades are naturally
+  // limit entries — a lower maker rate here (Bybit ~2bps vs 5.5bps taker) roughly halves the
+  // assumed round-trip cost, which on 5m/15m can be the difference between an edge surviving
+  // costs and not.
+  const [entryFeeBps, setEntryFeeBps] = useState("");
   const [slippageBps, setSlippageBps] = useState("2");
   const [fillModel, setFillModel] = useState<"signalClose" | "nextOpen">("signalClose");
   const [maintenanceMarginRate, setMaintenanceMarginRate] = useState(""); // blank = liquidation check off
@@ -170,6 +176,7 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
     maxPositionUsd: Number(maxPositionUsd) || 1_000,
     leverage: Number(leverage) || 5,
     feeBps: Number(feeBps) || 0,
+    ...(entryFeeBps.trim() !== "" ? { entryFeeBps: Number(entryFeeBps) || 0 } : {}),
     slippageBps: Number(slippageBps) || 0,
     fillModel,
     ...(maintenanceMarginRate.trim() !== "" ? { maintenanceMarginRate: Number(maintenanceMarginRate) / 100 } : {}),
@@ -254,10 +261,13 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
           <Field label="Initial capital" type="number" min="0" value={initialCapital} onChange={setInitialCapital} hint="USDT" />
           <Field label="Margin / trade" type="number" min="0" value={maxPositionUsd} onChange={setMaxPositionUsd} hint="USDT" />
           <Field label="Leverage" type="number" min="1" value={leverage} onChange={setLeverage} hint="x" />
-          <Field label="Taker fee" type="number" min="0" step="0.1" value={feeBps} onChange={setFeeBps} hint="bps" />
+          <Field label="Fee (taker)" type="number" min="0" step="0.1" value={feeBps} onChange={setFeeBps} hint="bps · both sides" />
+          <Field label="Entry fee (maker)" type="number" min="0" step="0.1" value={entryFeeBps} onChange={setEntryFeeBps} hint="bps · blank = fee" />
           <Field label="Slippage" type="number" min="0" step="0.1" value={slippageBps} onChange={setSlippageBps} hint="bps" />
           <div className="flex flex-col gap-1.5 min-w-0">
-            <label className="data-label">Fill model</label>
+            <div className={FIELD_HEADER_CLASS}>
+              <label className="data-label">Fill model</label>
+            </div>
             <Select
               value={fillModel}
               onChange={(v) => setFillModel(v as "signalClose" | "nextOpen")}
@@ -274,7 +284,7 @@ export const BacktestConfig: FC<BacktestConfigProps> = ({ onRun, isRunning, pref
             step="0.1"
             value={maintenanceMarginRate}
             onChange={setMaintenanceMarginRate}
-            hint="% · blank = no liquidation check"
+            hint="% · blank = disabled"
           />
         </div>
       </div>
@@ -317,7 +327,9 @@ const ParamField: FC<{ param: BacktestStrategyParam; value: number; onChange: (v
   if (param.options) {
     return (
       <div className="flex flex-col gap-1.5 min-w-0">
-        <label className="data-label">{param.label}</label>
+        <div className={FIELD_HEADER_CLASS}>
+          <label className="data-label">{param.label}</label>
+        </div>
         <Select
           value={String(value)}
           onChange={(v) => onChange(Number(v))}

@@ -17,6 +17,8 @@ const EXIT_REASON_LABEL: Record<string, string> = {
   liquidation: "Liquidation",
   reversal: "Reversal",
   windowEnd: "Window end",
+  flat: "Flat signal",
+  timeStop: "Time stop",
 };
 
 function exportCsv(trades: BacktestTrade[]) {

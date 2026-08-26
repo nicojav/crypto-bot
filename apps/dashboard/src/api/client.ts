@@ -208,7 +208,7 @@ export type BacktestStrategy = {
   supportsPine: boolean;
 };
 
-export type BacktestExitReason = "tp" | "sl" | "liquidation" | "reversal" | "windowEnd";
+export type BacktestExitReason = "tp" | "sl" | "liquidation" | "reversal" | "windowEnd" | "flat" | "timeStop";
 
 export type BacktestTrade = {
   entryTime: number;
@@ -265,6 +265,18 @@ export type BacktestStats = {
   expectancy: number | null;
   /** % of bars in the window spent holding a position. */
   exposurePct: number;
+  /** Total trading fees paid across all trades (entry + exit). Absent on runs persisted before
+   * this field existed — historical OptimizationRun rows don't carry it. */
+  totalFeesUsd?: number;
+  /** Total funding paid (positive) or received (negative) across all trades. */
+  totalFundingUsd?: number;
+  /** Fees + funding as % of initial capital. */
+  costDragPct?: number;
+  /** Mean per-trade price edge BEFORE costs, in %. Compare against avgCostPct — a strategy can
+   * have a real positive edge here and still lose money once avgCostPct exceeds it. */
+  avgGrossPnlPct?: number;
+  /** Mean per-trade cost (fees + funding) as % of the position's entry notional. */
+  avgCostPct?: number;
   maxConsecutiveLosses: number;
   exitReasonBreakdown: BacktestExitReasonBreakdown[];
   monthlyReturns: BacktestMonthlyReturn[];
@@ -302,6 +314,10 @@ export const runBacktest = (body: {
   maxPositionUsd?: number;
   leverage?: number;
   feeBps?: number;
+  /** Per-side overrides for feeBps — a limit entry (ORB retest, VWAP fade) pays the maker rate
+   * while a market exit still pays taker; leaving either unset falls back to feeBps. */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   maintenanceMarginRate?: number;
@@ -337,6 +353,10 @@ export const runBacktestOptimize = (body: {
   maxPositionUsd?: number;
   leverage?: number;
   feeBps?: number;
+  /** Per-side overrides for feeBps — a limit entry (ORB retest, VWAP fade) pays the maker rate
+   * while a market exit still pays taker; leaving either unset falls back to feeBps. */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   minTrades?: number;
@@ -383,6 +403,10 @@ export type AutoOptimizeRun = {
   backtestsRun: number;
   error: string | null;
   createdAt: string;
+  /** The date range this run was actually requested over (from its configJson snapshot).
+   * Null only for a row whose config failed to parse. */
+  from: string | null;
+  to: string | null;
   results: AutoOptimizeCellResult[];
 };
 
@@ -392,6 +416,8 @@ export type AutoOptimizeRunSummary = {
   cellsTotal: number;
   cellsDone: number;
   createdAt: string;
+  from: string | null;
+  to: string | null;
 };
 
 export const startAutoOptimize = (body: {
@@ -411,6 +437,10 @@ export const startAutoOptimize = (body: {
   maxPositionUsd?: number;
   leverage?: number;
   feeBps?: number;
+  /** Per-side overrides for feeBps — a limit entry (ORB retest, VWAP fade) pays the maker rate
+   * while a market exit still pays taker; leaving either unset falls back to feeBps. */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
 }) => req<{ runId: number }>("/api/backtest/optimize/auto", { method: "POST", body: JSON.stringify(body) });

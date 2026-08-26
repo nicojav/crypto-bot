@@ -17,7 +17,17 @@ export interface StrategyParamDef {
   showIf?: { param: string; equals: number };
 }
 
-export type SignalAction = "long" | "short";
+/**
+ * "flat" closes any open position without opening a new one — the backtest counterpart of the
+ * live webhook's CLOSE action (see routes/webhook.ts and SignalProcessor). Intraday strategies
+ * need it for exits that a static TP price can't express: flattening at session end, or exiting
+ * into a moving target like session VWAP.
+ *
+ * Because `run()` has no visibility into position state, strategies emit "flat" unconditionally
+ * whenever their exit condition holds; the engine no-ops the ones where nothing is open. That
+ * redundancy is deliberate — it's what keeps strategies stateless.
+ */
+export type SignalAction = "long" | "short" | "flat";
 
 export interface SignalEvent {
   barIndex: number;
@@ -30,6 +40,13 @@ export interface SignalEvent {
   tpAtrMult?: number;
   slAtrMult?: number;
   atrAtSignal?: number;
+  /**
+   * Time stop: force-close the position this signal opens once it has been held this many bars.
+   * Checked after the price-triggered exits, so an SL/TP touch on the same bar still wins. Caps
+   * how long capital (and funding exposure) sits in a trade that never resolved either way —
+   * essential on intraday timeframes, where a dead position otherwise rides to `windowEnd`.
+   */
+  maxBarsHeld?: number;
 }
 
 export interface StrategyDefinition {

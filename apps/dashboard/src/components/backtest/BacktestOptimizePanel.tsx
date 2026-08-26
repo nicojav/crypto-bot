@@ -23,6 +23,7 @@ export interface OptimizeRunConfigBase {
   maxPositionUsd: number;
   leverage: number;
   feeBps: number;
+  entryFeeBps?: number;
   slippageBps: number;
   fillModel: "signalClose" | "nextOpen";
 }
@@ -98,6 +99,7 @@ export const BacktestOptimizePanel: FC<BacktestOptimizePanelProps> = ({ sweepabl
       maxPositionUsd: runConfigBase.maxPositionUsd,
       leverage: runConfigBase.leverage,
       feeBps: runConfigBase.feeBps,
+      entryFeeBps: runConfigBase.entryFeeBps,
       slippageBps: runConfigBase.slippageBps,
       fillModel: runConfigBase.fillModel,
     });

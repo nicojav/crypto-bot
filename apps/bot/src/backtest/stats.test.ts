@@ -146,6 +146,73 @@ describe("computeStats", () => {
     expect(stats.monthlyReturns[1]!.month).toBe("2026-02");
     expect(stats.monthlyReturns[1]!.returnPct).toBeCloseTo(10, 6);
   });
+
+  // ── cost-drag diagnostics ──────────────────────────────────────────────────
+  //
+  // These exist to answer the question a raw PnL% can't: whether a strategy has a real edge that
+  // costs ate, versus never having an edge at all. avgGrossPnlPct is the price return before
+  // costs; avgCostPct is what it paid to capture that return. A high-frequency intraday config
+  // losing money should show a positive avgGrossPnlPct alongside an avgCostPct that outweighs it —
+  // otherwise the loss isn't a cost problem at all.
+
+  it("sums fees and funding across trades into totalFeesUsd/totalFundingUsd", () => {
+    const trades = [
+      trade({ pnlUsd: 10, feeUsd: 2, fundingUsd: 0.5 }),
+      trade({ pnlUsd: -5, feeUsd: 3, fundingUsd: -0.2 }),
+    ];
+    const stats = computeStats(trades, [{ time: 0, equity: 10_000 }], 10_000, "1d");
+
+    expect(stats.totalFeesUsd).toBeCloseTo(5, 9);
+    expect(stats.totalFundingUsd).toBeCloseTo(0.3, 9);
+  });
+
+  it("expresses costDragPct as fees+funding over initial capital", () => {
+    const trades = [trade({ feeUsd: 40, fundingUsd: 10 })];
+    const stats = computeStats(trades, [{ time: 0, equity: 10_000 }], 10_000, "1d");
+
+    expect(stats.costDragPct).toBeCloseTo(0.5, 9); // (40+10)/10_000 * 100
+  });
+
+  it("reports avgGrossPnlPct as the mean of the raw (fee-unadjusted) price returns", () => {
+    const trades = [trade({ pnlPct: 10 }), trade({ pnlPct: -4 })];
+    const stats = computeStats(trades, [{ time: 0, equity: 10_000 }], 10_000, "1d");
+
+    expect(stats.avgGrossPnlPct).toBeCloseTo(3, 9);
+  });
+
+  it("reports avgCostPct as the mean per-trade (fee+funding)/notional, not a portfolio-wide ratio", () => {
+    const trades = [
+      trade({ sizeUsd: 1_000, feeUsd: 5, fundingUsd: 0 }), // 0.5%
+      trade({ sizeUsd: 500, feeUsd: 5, fundingUsd: 0 }), // 1.0%
+    ];
+    const stats = computeStats(trades, [{ time: 0, equity: 10_000 }], 10_000, "1d");
+
+    expect(stats.avgCostPct).toBeCloseTo(0.75, 9); // mean(0.5, 1.0), not (10 total fee / 1500 total notional)
+  });
+
+  it("makes visible a real gross edge that costs have fully eaten", () => {
+    // The exact shape the diagnostic exists for: positive gross edge, net loss, because cost > edge.
+    const trades = [
+      trade({ pnlPct: 0.08, pnlUsd: -70, sizeUsd: 10_000, feeUsd: 110, fundingUsd: 0 }),
+      trade({ pnlPct: 0.08, pnlUsd: -70, sizeUsd: 10_000, feeUsd: 110, fundingUsd: 0 }),
+    ];
+    const equityCurve: EquityPoint[] = [{ time: 0, equity: 10_000 }, { time: 1, equity: 9_860 }];
+    const stats = computeStats(trades, equityCurve, 10_000, "1d");
+
+    expect(stats.totalPnlPct).toBeLessThan(0);
+    expect(stats.avgGrossPnlPct).toBeGreaterThan(0);
+    expect(stats.avgCostPct).toBeGreaterThan(stats.avgGrossPnlPct);
+  });
+
+  it("is all zero with no trades, rather than NaN from an empty mean", () => {
+    const stats = computeStats([], [{ time: 0, equity: 10_000 }], 10_000, "1d");
+
+    expect(stats.totalFeesUsd).toBe(0);
+    expect(stats.totalFundingUsd).toBe(0);
+    expect(stats.costDragPct).toBe(0);
+    expect(stats.avgGrossPnlPct).toBe(0);
+    expect(stats.avgCostPct).toBe(0);
+  });
 });
 
 describe("computeSharpe", () => {

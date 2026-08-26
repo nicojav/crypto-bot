@@ -42,6 +42,23 @@ const threeNumericParamsStrategy: StrategyDefinition = {
   run: () => [],
 };
 
+// Two independent enum gates (2 x 4 = 8 branches) mirroring customMaCross gaining regimeMode(4)
+// on top of its existing tpslMode-shaped gates — the case minCombosPerBranch exists to protect.
+// "always" has no showIf, so every branch has exactly one visible numeric param regardless of
+// which gates are set — keeps the per-branch resolution cap identical across all 8 branches, so
+// the floor's effect isn't confounded by some branches simply having nothing to sample.
+const manyBranchesStrategy: StrategyDefinition = {
+  id: "manyBranches",
+  label: "Many Branches",
+  description: "",
+  params: [
+    { name: "gateA", label: "Gate A", default: 0, min: 0, max: 1, step: 1, options: ["Off", "On"] },
+    { name: "gateB", label: "Gate B", default: 0, min: 0, max: 3, step: 1, options: ["W", "X", "Y", "Z"] },
+    { name: "always", label: "Always visible", default: 5, min: 0, max: 20, step: 1 },
+  ],
+  run: () => [],
+};
+
 describe("buildCoarseGrid", () => {
   it("gives every numeric param real coverage even under a tight combo budget (no starved dimensions)", () => {
     const combos = buildCoarseGrid(threeNumericParamsStrategy, { maxCombosPerCell: 20, maxValuesPerParam: 5 });
@@ -91,6 +108,46 @@ describe("buildCoarseGrid", () => {
     const a = buildCoarseGrid(gatedStrategy, { maxCombosPerCell: 50, maxValuesPerParam: 4 });
     const b = buildCoarseGrid(gatedStrategy, { maxCombosPerCell: 50, maxValuesPerParam: 4 });
     expect(a).toEqual(b);
+  });
+
+  describe("minCombosPerBranch", () => {
+    it("without a floor, many branches under a small budget starve most branches to a single combo", () => {
+      // 8 branches, budget 20 -> floor(20/8) = 2 per branch. Tightening further makes the point
+      // sharper: at maxCombosPerCell 8, plain even split floors to 1 per branch everywhere.
+      const combos = buildCoarseGrid(manyBranchesStrategy, { maxCombosPerCell: 8, maxValuesPerParam: 5 });
+      const perBranch = new Map<string, number>();
+      for (const c of combos) {
+        const key = `${c.gateA}:${c.gateB}`;
+        perBranch.set(key, (perBranch.get(key) ?? 0) + 1);
+      }
+      expect(perBranch.size).toBe(8); // every branch still appears at least once
+      expect([...perBranch.values()].every((n) => n <= 1)).toBe(true); // but none gets more than 1
+    });
+
+    it("with a floor, every branch gets at least minCombosPerBranch even though that exceeds maxCombosPerCell", () => {
+      const combos = buildCoarseGrid(manyBranchesStrategy, { maxCombosPerCell: 8, maxValuesPerParam: 10, minCombosPerBranch: 6 });
+      const perBranch = new Map<string, number>();
+      for (const c of combos) {
+        const key = `${c.gateA}:${c.gateB}`;
+        perBranch.set(key, (perBranch.get(key) ?? 0) + 1);
+      }
+      expect(perBranch.size).toBe(8);
+      for (const n of perBranch.values()) expect(n).toBeGreaterThanOrEqual(6);
+      // Total necessarily exceeds the nominal cap — that's the whole point of the floor.
+      expect(combos.length).toBeGreaterThan(8);
+    });
+
+    it("never samples a branch past its own resolution cap just to satisfy the floor", () => {
+      // maxValuesPerParam 1 x one numeric param -> resolutionCap 1 for every branch, so even a
+      // huge floor can't push any branch past a single meaningfully distinct combo.
+      const combos = buildCoarseGrid(manyBranchesStrategy, { maxCombosPerCell: 8, maxValuesPerParam: 1, minCombosPerBranch: 50 });
+      const perBranch = new Map<string, number>();
+      for (const c of combos) {
+        const key = `${c.gateA}:${c.gateB}`;
+        perBranch.set(key, (perBranch.get(key) ?? 0) + 1);
+      }
+      for (const n of perBranch.values()) expect(n).toBe(1);
+    });
   });
 });
 

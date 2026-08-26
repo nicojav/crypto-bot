@@ -33,9 +33,21 @@ export interface GridBudget {
   maxCombosPerCell: number;
   /** How many candidate values to sample across a numeric param's [min, max] range. */
   maxValuesPerParam: number;
+  /**
+   * Floor on the samples allocated to each enum branch, allowed to push the total past
+   * `maxCombosPerCell`.
+   *
+   * Enum params are fully expanded into branches and the budget is split across them, so branch
+   * count multiplies fast: customMaCross alone has 2×2×3 = 12 branches, and the regime/session
+   * gate takes it to 96. Under a plain even split that is 2 samples per branch — the sampler
+   * would be reporting noise, and adding a useful param would make the search strictly worse.
+   * This floor keeps every branch meaningfully sampled at the cost of a longer run. Optional and
+   * unset (no floor) for backward compatibility with any caller building a `GridBudget` by hand.
+   */
+  minCombosPerBranch?: number;
 }
 
-export const DEFAULT_COARSE_BUDGET: GridBudget = { maxCombosPerCell: 200, maxValuesPerParam: 5 };
+export const DEFAULT_COARSE_BUDGET: GridBudget = { maxCombosPerCell: 200, maxValuesPerParam: 5, minCombosPerBranch: 12 };
 
 export interface RefineOptions {
   /** Refine window = ± (originalStep * window) around a coarse winner's value. */
@@ -127,7 +139,10 @@ export function buildCoarseGrid(strategy: StrategyDefinition, budget: GridBudget
     }
     const budgetShare = Math.floor(budget.maxCombosPerCell / branches.length);
     const resolutionCap = budget.maxValuesPerParam * numericParams.length;
-    const count = Math.max(1, Math.min(budgetShare, resolutionCap));
+    // The floor wins over the even split, but never over the resolution cap — sampling a branch
+    // more densely than its params have distinct values to offer just duplicates work.
+    const minPerBranch = budget.minCombosPerBranch ?? 1;
+    const count = Math.max(1, Math.min(Math.max(budgetShare, minPerBranch), resolutionCap));
 
     const points = latinHypercube(count, numericParams.length, rng);
     for (const point of points) {
@@ -139,7 +154,10 @@ export function buildCoarseGrid(strategy: StrategyDefinition, budget: GridBudget
     }
   }
 
-  return combos.slice(0, budget.maxCombosPerCell);
+  // Ceiling has to accommodate the per-branch floor, or the slice would silently undo it and
+  // starve every branch past the first few in iteration order.
+  const hardCap = Math.max(budget.maxCombosPerCell, (budget.minCombosPerBranch ?? 1) * branches.length);
+  return combos.slice(0, hardCap);
 }
 
 /**

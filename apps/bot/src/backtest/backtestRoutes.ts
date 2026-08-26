@@ -117,6 +117,11 @@ const statsSchema = {
     calmarRatio: { type: "number" },
     expectancy: { type: ["number", "null"] },
     exposurePct: { type: "number" },
+    totalFeesUsd: { type: "number" },
+    totalFundingUsd: { type: "number" },
+    costDragPct: { type: "number" },
+    avgGrossPnlPct: { type: "number" },
+    avgCostPct: { type: "number" },
     maxConsecutiveLosses: { type: "integer" },
     exitReasonBreakdown: {
       type: "array",
@@ -148,6 +153,10 @@ const statsSchema = {
     "avgPnlPct", "avgBarsHeld", "largestProfitUsd", "largestLossUsd", "avgProfitPct",
     "avgLossPct", "returnsHistogram", "sharpeRatio", "sortinoRatio", "calmarRatio",
     "expectancy", "exposurePct", "maxConsecutiveLosses", "exitReasonBreakdown", "monthlyReturns",
+    // The cost fields above are deliberately NOT required. This same schema serializes
+    // OptimizationRun rows persisted before those fields existed, and fast-json-stringify throws
+    // on a missing required property — marking them required would 500 every historical run in
+    // the history panel. Fresh results always carry them; old ones render without.
   ],
 } as const;
 
@@ -278,10 +287,28 @@ const autoOptimizeRunSchema = {
     backtestsRun: { type: "integer" },
     error: { type: ["string", "null"] },
     createdAt: { type: "string" },
+    from: { type: ["string", "null"] },
+    to: { type: ["string", "null"] },
     results: { type: "array", items: cellResultSchema },
   },
-  required: ["id", "status", "cellsTotal", "cellsDone", "backtestsRun", "createdAt", "results"],
+  required: ["id", "status", "cellsTotal", "cellsDone", "backtestsRun", "createdAt", "from", "to", "results"],
 } as const;
+
+// The run's requested date range lives only inside its configJson snapshot (see
+// AutoOptimizeConfig) — never on its own columns — so both the single-run and history routes
+// below parse it out here. Tolerates a malformed/legacy row (e.g. a schema change) by degrading
+// to nulls instead of 500ing the whole response.
+function configRange(configJson: string): { from: string | null; to: string | null } {
+  try {
+    const config = JSON.parse(configJson) as { from?: unknown; to?: unknown };
+    return {
+      from: typeof config.from === "string" ? config.from : null,
+      to: typeof config.to === "string" ? config.to : null,
+    };
+  } catch {
+    return { from: null, to: null };
+  }
+}
 
 // ── Typed request shapes ──────────────────────────────────────────────────────
 
@@ -296,6 +323,9 @@ interface RunBody {
   maxPositionUsd?: number;
   leverage?: number;
   feeBps?: number;
+  /** Per-side overrides for `feeBps` — see EngineConfig.entryFeeBps. */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   maintenanceMarginRate?: number;
@@ -327,6 +357,9 @@ interface OptimizeBody {
   maxPositionUsd?: number;
   leverage?: number;
   feeBps?: number;
+  /** Per-side overrides for `feeBps` — see EngineConfig.entryFeeBps. */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   minTrades?: number;
@@ -350,6 +383,9 @@ interface AutoOptimizeBody {
   maxPositionUsd?: number;
   leverage?: number;
   feeBps?: number;
+  /** Per-side overrides for `feeBps` — see EngineConfig.entryFeeBps. */
+  entryFeeBps?: number;
+  exitFeeBps?: number;
   slippageBps?: number;
   fillModel?: "signalClose" | "nextOpen";
   maintenanceMarginRate?: number;
@@ -444,6 +480,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           maxPositionUsd:    { type: "number", exclusiveMinimum: 0, default: 1_000 },
           leverage:          { type: "integer", minimum: 1, maximum: 100, default: 5 },
           feeBps:            { type: "number", minimum: 0, default: 5.5 },
+          entryFeeBps:       { type: "number", minimum: 0 },
+          exitFeeBps:        { type: "number", minimum: 0 },
           slippageBps:       { type: "number", minimum: 0, default: 2 },
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
           maintenanceMarginRate: { type: "number", minimum: 0, maximum: 1 },
@@ -513,6 +551,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
       leverage: req.body.leverage ?? 5,
       feeBps: req.body.feeBps ?? 5.5,
+      entryFeeBps: req.body.entryFeeBps,
+      exitFeeBps: req.body.exitFeeBps,
       slippageBps: req.body.slippageBps ?? 2,
       fillModel: req.body.fillModel ?? "signalClose",
       lotSize: instrument.lotSize,
@@ -536,7 +576,16 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
     // A result that only looks good at the exact fee/slippage assumptions above is a fee-model
     // artifact, not an edge. sensitivityCheck re-runs at double both, so that's visible instead
     // of hidden behind whatever constants happened to be configured.
-    const sensitivityConfig = { ...engineConfig, slippageBps: engineConfig.slippageBps * 2, feeBps: engineConfig.feeBps * 2 };
+    // The per-side overrides have to be doubled alongside `feeBps`, not left alone: they take
+    // precedence over it in the engine, so a split-fee config would otherwise sail through the
+    // sensitivity run at its original fees and look far more robust than it is.
+    const sensitivityConfig = {
+      ...engineConfig,
+      slippageBps: engineConfig.slippageBps * 2,
+      feeBps: engineConfig.feeBps * 2,
+      ...(engineConfig.entryFeeBps != null ? { entryFeeBps: engineConfig.entryFeeBps * 2 } : {}),
+      ...(engineConfig.exitFeeBps != null ? { exitFeeBps: engineConfig.exitFeeBps * 2 } : {}),
+    };
 
     // Off the main thread — this request used to run the full simulation synchronously inline,
     // which could stall webhook ingestion/reconciliation in this same process for as long as a
@@ -588,6 +637,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           maxPositionUsd:    { type: "number", exclusiveMinimum: 0, default: 1_000 },
           leverage:          { type: "integer", minimum: 1, maximum: 100, default: 5 },
           feeBps:            { type: "number", minimum: 0, default: 5.5 },
+          entryFeeBps:       { type: "number", minimum: 0 },
+          exitFeeBps:        { type: "number", minimum: 0 },
           slippageBps:       { type: "number", minimum: 0, default: 2 },
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
           minTrades:         { type: "integer", minimum: 0, default: 10 },
@@ -662,6 +713,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
       leverage: req.body.leverage ?? 5,
       feeBps: req.body.feeBps ?? 5.5,
+      entryFeeBps: req.body.entryFeeBps,
+      exitFeeBps: req.body.exitFeeBps,
       slippageBps: req.body.slippageBps ?? 2,
       fillModel: req.body.fillModel ?? "signalClose",
       lotSize: instrument.lotSize,
@@ -722,6 +775,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
           maxPositionUsd:    { type: "number", exclusiveMinimum: 0, default: 1_000 },
           leverage:          { type: "integer", minimum: 1, maximum: 100, default: 5 },
           feeBps:            { type: "number", minimum: 0, default: 5.5 },
+          entryFeeBps:       { type: "number", minimum: 0 },
+          exitFeeBps:        { type: "number", minimum: 0 },
           slippageBps:       { type: "number", minimum: 0, default: 2 },
           fillModel:         { type: "string", enum: ["signalClose", "nextOpen"], default: "signalClose" },
           maintenanceMarginRate: { type: "number", minimum: 0, maximum: 1 },
@@ -784,6 +839,8 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
         maxPositionUsd: req.body.maxPositionUsd ?? 1_000,
         leverage: req.body.leverage ?? 5,
         feeBps: req.body.feeBps ?? 5.5,
+        entryFeeBps: req.body.entryFeeBps,
+        exitFeeBps: req.body.exitFeeBps,
         slippageBps: req.body.slippageBps ?? 2,
         fillModel: req.body.fillModel ?? "signalClose",
         maintenanceMarginRate: req.body.maintenanceMarginRate,
@@ -830,6 +887,7 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
       backtestsRun: run.backtestsRun,
       error: run.error,
       createdAt: run.createdAt.toISOString(),
+      ...configRange(run.configJson),
       results: JSON.parse(run.resultsJson),
     };
   });
@@ -848,15 +906,24 @@ export const backtestPlugin: FastifyPluginAsync<{ db: PrismaClient; bybit?: Bybi
               cellsTotal: { type: "integer" },
               cellsDone: { type: "integer" },
               createdAt: { type: "string" },
+              from: { type: ["string", "null"] },
+              to: { type: ["string", "null"] },
             },
-            required: ["id", "status", "cellsTotal", "cellsDone", "createdAt"],
+            required: ["id", "status", "cellsTotal", "cellsDone", "createdAt", "from", "to"],
           },
         },
       },
     },
   }, async () => {
     const runs = await db.optimizationRun.findMany({ orderBy: { createdAt: "desc" }, take: 20 });
-    return runs.map((r) => ({ id: r.id, status: r.status, cellsTotal: r.cellsTotal, cellsDone: r.cellsDone, createdAt: r.createdAt.toISOString() }));
+    return runs.map((r) => ({
+      id: r.id,
+      status: r.status,
+      cellsTotal: r.cellsTotal,
+      cellsDone: r.cellsDone,
+      createdAt: r.createdAt.toISOString(),
+      ...configRange(r.configJson),
+    }));
   });
 
   // POST /api/backtest/optimize/auto/:runId/cancel
